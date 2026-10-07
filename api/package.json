@@ -1,9 +1,8 @@
 {
   "name": "agent-assurance-api",
   "version": "1.0.0",
-  "main": "src/functions/*.js",
-  "type": "module",
   "dependencies": {
-    "@azure/functions": "latest"
+    "@azure/identity": "^4.13.3",
+    "@azure/monitor-query-logs": "^1.0.0"
   }
 }

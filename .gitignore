@@ -3,3 +3,5 @@ dist
 .env
 local.settings.json
 .DS_Store
+
+api/local.settings.json
