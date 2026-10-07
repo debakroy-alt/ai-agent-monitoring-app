@@ -1,3 +1,13 @@
 // Azure Functions fallback endpoint. Replace the TODO with a server-side Application Insights query adapter.
 // Do not place connection strings, API keys or client secrets in frontend files.
-module.exports=async function(context){context.res={status:503,headers:{'Content-Type':'application/json'},body:{mode:'demo',message:'Live telemetry adapter is not configured. The UI will safely use demo data.'}}};
+module.exports = async function (context) {
+  context.res = {
+    status: 503,
+    headers: { 'Content-Type': 'application/json' },
+    body: {
+      mode: 'demo',
+      message:
+        'Live telemetry adapter is not configured. The UI will safely use demo data.',
+    },
+  };
+};

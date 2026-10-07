@@ -1,11 +1,327 @@
-import React,{useEffect,useMemo,useState} from 'react';import{createRoot}from'react-dom/client';import{Activity,AlertTriangle,ArrowLeft,BarChart3,Bot,ChevronRight,Clock3,DollarSign,RefreshCw,Search,ShieldCheck,Wifi}from'lucide-react';import{demoAgents}from'./demoData';import'./styles.css';
-const labels={green:'Healthy',amber:'Watch',red:'Action required',unknown:'Not monitored'};
-function Status({value,compact=false}){return <span className={`status ${value} ${compact?'compact':''}`}><i/>{labels[value]||value}</span>}
-function Spark({points,status}){let max=Math.max(...points),min=Math.min(...points),d=points.map((p,i)=>`${i?'L':'M'} ${i*30} ${54-(p-min)/(max-min||1)*40}`).join(' ');return <svg className={`spark ${status}`} viewBox="0 0 180 60" aria-label="Seven point activity trend"><path d={d}/></svg>}
-function MetricRow({m}){return <div className="metric-row"><Status value={m.status} compact/><div className="metric-copy"><b>{m.name}</b><span>{m.why}</span></div><div className="metric-value"><b>{m.value}</b><span>{m.threshold}</span></div></div>}
-function App(){const[agents,setAgents]=useState([]),[mode,setMode]=useState('loading'),[selected,setSelected]=useState(null),[pillar,setPillar]=useState('health'),[q,setQ]=useState(''),[refreshing,setRefreshing]=useState(false);
- const load=async()=>{setRefreshing(true);try{let r=await fetch('/api/agents');if(!r.ok)throw 0;let j=await r.json();setAgents(j.agents);setMode(j.mode||'live')}catch{setAgents(demoAgents);setMode('demo')}finally{setRefreshing(false)}};useEffect(()=>{load()},[]);
- const shown=useMemo(()=>agents.filter(a=>(a.name+a.provider+a.environment).toLowerCase().includes(q.toLowerCase())),[agents,q]);const action=agents.filter(a=>['red','amber'].includes(a.statuses.overall)).length;const covered=agents.length?Math.round(agents.reduce((s,a)=>s+(Object.values(a.statuses).filter(x=>x!=='unknown').length/4),0)/agents.length*100):0;
- if(selected){let a=agents.find(x=>x.id===selected);let items=a.metrics[pillar];return <main><Header mode={mode} load={load} refreshing={refreshing}/><div className="shell"><button className="back" onClick={()=>setSelected(null)}><ArrowLeft size={16}/>All agents</button><section className="agent-head"><div><span className="eyebrow">AGENT ASSURANCE PROFILE</span><h1>{a.name}</h1><p>{a.purpose}</p><div className="meta"><span>{a.provider}</span><span>{a.environment}</span><span><Clock3 size={14}/> Updated {a.updated}</span></div></div><Status value={a.statuses.overall}/></section><div className="pillar-tabs">{['health','risk','cost'].map(x=><button className={pillar===x?'active':''} onClick={()=>setPillar(x)} key={x}>{x==='health'?<Activity/>:x==='risk'?<ShieldCheck/>:<DollarSign/>}<span>{x[0].toUpperCase()+x.slice(1)}<Status value={a.statuses[x]} compact/></span></button>)}</div><section className="detail-grid"><div className="panel"><div className="panel-title"><div><span className="eyebrow">WHY THIS STATUS</span><h2>{pillar[0].toUpperCase()+pillar.slice(1)} evidence</h2></div><Status value={a.statuses[pillar]}/></div>{items.map(m=><MetricRow key={m.name} m={m}/>)}</div><aside className="panel"><span className="eyebrow">DATA CONFIDENCE</span><h2>Telemetry coverage</h2><div className="coverage"><div><Wifi/><span><b>Health</b>Application Insights signals</span><Status value="green" compact/></div><div><ShieldCheck/><span><b>Risk</b>Partial runtime coverage</span><Status value="amber" compact/></div><div><DollarSign/><span><b>Cost</b>Token feed required</span><Status value="unknown" compact/></div></div><div className="note">Gray means the metric is unavailable or not monitored. It is never treated as healthy.</div></aside></section></div></main>}
- return <main><Header mode={mode} load={load} refreshing={refreshing}/><div className="shell"><section className="hero"><span className="eyebrow">EXECUTIVE RUNTIME VIEW</span><h1>AI Agent Runtime Assurance</h1><p>Operational health, runtime risk and cost visibility across the agent portfolio.</p></section><section className="summary"><Summary icon={<Bot/>} label="Agents monitored" value={agents.length}/><Summary icon={<AlertTriangle/>} label="Need attention" value={action}/><Summary icon={<Activity/>} label="Telemetry coverage" value={`${covered}%`}/><Summary icon={<Clock3/>} label="Window" value="7 days"/></section><div className="toolbar"><div className="search"><Search size={17}/><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search agents or providers"/></div><span className="legend"><i className="g"/>Healthy <i className="a"/>Watch <i className="r"/>Action <i className="u"/>No data</span></div><section className="agents">{shown.map(a=><article className="agent-card" key={a.id} onClick={()=>setSelected(a.id)} tabIndex="0" onKeyDown={e=>e.key==='Enter'&&setSelected(a.id)}><div className="agent-card-top"><div className="agent-icon"><Bot/></div><div><h2>{a.name}</h2><p>{a.provider} · {a.environment}</p></div><ChevronRight className="chev"/></div><p className="purpose">{a.purpose}</p><div className="status-grid">{['health','risk','cost'].map(x=><div key={x}><span>{x}</span><Status value={a.statuses[x]} compact/></div>)}</div><div className="trend"><div><span>7-day interactions</span><b>{a.volume.toLocaleString()}</b></div><Spark points={a.trend} status={a.statuses.overall}/></div><footer><Status value={a.statuses.overall}/><span>Updated {a.updated}</span></footer></article>)}</section></div></main>}
-function Header({mode,load,refreshing}){return <header><div className="brand"><div className="mark"><BarChart3/></div><span>Agent Assurance</span></div><div className="header-actions"><span className={`mode ${mode}`}>{mode==='demo'?'Demo data':mode==='live'?'Live telemetry':'Connecting'}</span><button onClick={load}><RefreshCw className={refreshing?'spin':''} size={16}/>Refresh</button></div></header>};function Summary({icon,label,value}){return <div className="summary-card"><div className="sum-icon">{icon}</div><div><span>{label}</span><b>{value}</b></div></div>}createRoot(document.getElementById('root')).render(<App/>);
+import React, { useEffect, useMemo, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  BarChart3,
+  Bot,
+  ChevronRight,
+  Clock3,
+  DollarSign,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Wifi,
+} from 'lucide-react';
+import './styles.css';
+const labels = {
+  green: 'Healthy',
+  amber: 'Watch',
+  red: 'Action required',
+  unknown: 'Not monitored',
+};
+function Status({ value, compact = false }) {
+  return (
+    <span className={`status ${value} ${compact ? 'compact' : ''}`}>
+      <i />
+      {labels[value] || value}
+    </span>
+  );
+}
+function Spark({ points, status }) {
+  let max = Math.max(...points),
+    min = Math.min(...points),
+    d = points
+      .map(
+        (p, i) => `${i ? 'L' : 'M'} ${i * 30} ${54 - ((p - min) / (max - min || 1)) * 40}`
+      )
+      .join(' ');
+  return (
+    <svg
+      className={`spark ${status}`}
+      viewBox="0 0 180 60"
+      aria-label="Seven point activity trend"
+    >
+      <path d={d} />
+    </svg>
+  );
+}
+function MetricRow({ m }) {
+  return (
+    <div className="metric-row">
+      <Status value={m.status} compact />
+      <div className="metric-copy">
+        <b>{m.name}</b>
+        <span>{m.why}</span>
+      </div>
+      <div className="metric-value">
+        <b>{m.value}</b>
+        <span>{m.threshold}</span>
+      </div>
+    </div>
+  );
+}
+function App() {
+  const [agents, setAgents] = useState([]),
+    [mode, setMode] = useState('loading'),
+    [selected, setSelected] = useState(null),
+    [pillar, setPillar] = useState('health'),
+    [q, setQ] = useState(''),
+    [refreshing, setRefreshing] = useState(false);
+  const load = async () => {
+    setRefreshing(true);
+    try {
+      let r = await fetch('/api/agents');
+      if (!r.ok) throw 0;
+      let j = await r.json();
+      setAgents(j.agents);
+      setMode(j.mode || 'live');
+    } catch (error) {
+      console.error('Telemetry API unavailable:', error);
+      setAgents([]);
+      setMode('error');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  useEffect(() => {
+    load();
+  }, []);
+  const shown = useMemo(
+    () =>
+      agents.filter((a) =>
+        (a.name + a.provider + a.environment).toLowerCase().includes(q.toLowerCase())
+      ),
+    [agents, q]
+  );
+  const action = agents.filter((a) =>
+    ['red', 'amber'].includes(a.statuses.overall)
+  ).length;
+  const covered = agents.length
+    ? Math.round(
+        (agents.reduce(
+          (s, a) =>
+            s + Object.values(a.statuses).filter((x) => x !== 'unknown').length / 4,
+          0
+        ) /
+          agents.length) *
+          100
+      )
+    : 0;
+  if (selected) {
+    let a = agents.find((x) => x.id === selected);
+    let items = a.metrics[pillar];
+    return (
+      <main>
+        <Header mode={mode} load={load} refreshing={refreshing} />
+        <div className="shell">
+          <button className="back" onClick={() => setSelected(null)}>
+            <ArrowLeft size={16} />
+            All agents
+          </button>
+          <section className="agent-head">
+            <div>
+              <span className="eyebrow">AGENT ASSURANCE PROFILE</span>
+              <h1>{a.name}</h1>
+              <p>{a.purpose}</p>
+              <div className="meta">
+                <span>{a.provider}</span>
+                <span>{a.environment}</span>
+                <span>
+                  <Clock3 size={14} /> Updated {a.updated}
+                </span>
+              </div>
+            </div>
+            <Status value={a.statuses.overall} />
+          </section>
+          <div className="pillar-tabs">
+            {['health', 'risk', 'cost'].map((x) => (
+              <button
+                className={pillar === x ? 'active' : ''}
+                onClick={() => setPillar(x)}
+                key={x}
+              >
+                {x === 'health' ? (
+                  <Activity />
+                ) : x === 'risk' ? (
+                  <ShieldCheck />
+                ) : (
+                  <DollarSign />
+                )}
+                <span>
+                  {x[0].toUpperCase() + x.slice(1)}
+                  <Status value={a.statuses[x]} compact />
+                </span>
+              </button>
+            ))}
+          </div>
+          <section className="detail-grid">
+            <div className="panel">
+              <div className="panel-title">
+                <div>
+                  <span className="eyebrow">WHY THIS STATUS</span>
+                  <h2>{pillar[0].toUpperCase() + pillar.slice(1)} evidence</h2>
+                </div>
+                <Status value={a.statuses[pillar]} />
+              </div>
+              {items.map((m) => (
+                <MetricRow key={m.name} m={m} />
+              ))}
+            </div>
+            <aside className="panel">
+              <span className="eyebrow">DATA CONFIDENCE</span>
+              <h2>Telemetry coverage</h2>
+              <div className="coverage">
+                <div>
+                  <Wifi />
+                  <span>
+                    <b>Health</b>Application Insights signals
+                  </span>
+                  <Status value="green" compact />
+                </div>
+                <div>
+                  <ShieldCheck />
+                  <span>
+                    <b>Risk</b>Partial runtime coverage
+                  </span>
+                  <Status value="amber" compact />
+                </div>
+                <div>
+                  <DollarSign />
+                  <span>
+                    <b>Cost</b>Token feed required
+                  </span>
+                  <Status value="unknown" compact />
+                </div>
+              </div>
+              <div className="note">
+                Gray means the metric is unavailable or not monitored. It is never treated
+                as healthy.
+              </div>
+            </aside>
+          </section>
+        </div>
+      </main>
+    );
+  }
+  return (
+    <main>
+      <Header mode={mode} load={load} refreshing={refreshing} />
+      <div className="shell">
+        <section className="hero">
+          <span className="eyebrow">EXECUTIVE RUNTIME VIEW</span>
+          <h1>AI Agent Runtime Assurance</h1>
+          <p>
+            Operational health, runtime risk and cost visibility across the agent
+            portfolio.
+          </p>
+        </section>
+        <section className="summary">
+          <Summary icon={<Bot />} label="Agents monitored" value={agents.length} />
+          <Summary icon={<AlertTriangle />} label="Need attention" value={action} />
+          <Summary icon={<Activity />} label="Telemetry coverage" value={`${covered}%`} />
+          <Summary icon={<Clock3 />} label="Window" value="7 days" />
+        </section>
+        <div className="toolbar">
+          <div className="search">
+            <Search size={17} />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search agents or providers"
+            />
+          </div>
+          <span className="legend">
+            <i className="g" />
+            Healthy <i className="a" />
+            Watch <i className="r" />
+            Action <i className="u" />
+            No data
+          </span>
+        </div>
+        <section className="agents">
+          {shown.map((a) => (
+            <article
+              className="agent-card"
+              key={a.id}
+              onClick={() => setSelected(a.id)}
+              tabIndex="0"
+              onKeyDown={(e) => e.key === 'Enter' && setSelected(a.id)}
+            >
+              <div className="agent-card-top">
+                <div className="agent-icon">
+                  <Bot />
+                </div>
+                <div>
+                  <h2>{a.name}</h2>
+                  <p>
+                    {a.provider} · {a.environment}
+                  </p>
+                </div>
+                <ChevronRight className="chev" />
+              </div>
+              <p className="purpose">{a.purpose}</p>
+              <div className="status-grid">
+                {['health', 'risk', 'cost'].map((x) => (
+                  <div key={x}>
+                    <span>{x}</span>
+                    <Status value={a.statuses[x]} compact />
+                  </div>
+                ))}
+              </div>
+              <div className="trend">
+                <div>
+                  <span>7-day interactions</span>
+                  <b>{a.volume.toLocaleString()}</b>
+                </div>
+                <Spark points={a.trend} status={a.statuses.overall} />
+              </div>
+              <footer>
+                <Status value={a.statuses.overall} />
+                <span>Updated {a.updated}</span>
+              </footer>
+            </article>
+          ))}
+        </section>
+      </div>
+    </main>
+  );
+}
+function Header({ mode, load, refreshing }) {
+  return (
+    <header>
+      <div className="brand">
+        <div className="mark">
+          <BarChart3 />
+        </div>
+        <span>Agent Assurance</span>
+      </div>
+      <div className="header-actions">
+        <span className={`mode ${mode}`}>
+          {mode === 'live'
+            ? 'Live telemetry'
+            : mode === 'error'
+              ? 'Telemetry unavailable'
+              : 'Connecting'}
+        </span>
+        <button onClick={load}>
+          <RefreshCw className={refreshing ? 'spin' : ''} size={16} />
+          Refresh
+        </button>
+      </div>
+    </header>
+  );
+}
+function Summary({ icon, label, value }) {
+  return (
+    <div className="summary-card">
+      <div className="sum-icon">{icon}</div>
+      <div>
+        <span>{label}</span>
+        <b>{value}</b>
+      </div>
+    </div>
+  );
+}
+createRoot(document.getElementById('root')).render(<App />);

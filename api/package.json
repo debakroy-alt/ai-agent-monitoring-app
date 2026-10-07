@@ -1,1 +1,9 @@
-{"name":"agent-assurance-api","version":"1.0.0","main":"src/functions/*.js","type":"module","dependencies":{"@azure/functions":"latest"}}
+{
+  "name": "agent-assurance-api",
+  "version": "1.0.0",
+  "main": "src/functions/*.js",
+  "type": "module",
+  "dependencies": {
+    "@azure/functions": "latest"
+  }
+}
