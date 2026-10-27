@@ -4,8 +4,7 @@ const severityRank = { unknown: 0, green: 1, amber: 2, red: 3 };
 
 function worstStatus(...statuses) {
   return statuses.reduce(
-    (worst, current) =>
-      severityRank[current] > severityRank[worst] ? current : worst,
+    (worst, current) => (severityRank[current] > severityRank[worst] ? current : worst),
     'unknown'
   );
 }
@@ -43,9 +42,7 @@ module.exports = async function (context) {
     const requestedDays = Number(process.env.TELEMETRY_LOOKBACK_DAYS || 30);
     const lookbackDays = Math.min(Math.max(requestedDays, 1), 90);
     const credential = new DefaultAzureCredential();
-    const token = await credential.getToken(
-      'https://api.loganalytics.io/.default'
-    );
+    const token = await credential.getToken('https://api.loganalytics.io/.default');
 
     const query = `
 let ConversationAgentMap =
@@ -121,8 +118,7 @@ ConversationHealth
     const result = await response.json();
     if (!response.ok) {
       throw new Error(
-        result?.error?.message ||
-          `Log Analytics returned HTTP ${response.status}`
+        result?.error?.message || `Log Analytics returned HTTP ${response.status}`
       );
     }
 
@@ -130,9 +126,7 @@ ConversationHealth
     if (!table) throw new Error('Log Analytics returned no result table.');
 
     const rawRows = table.rows.map((row) =>
-      Object.fromEntries(
-        table.columns.map((column, index) => [column.name, row[index]])
-      )
+      Object.fromEntries(table.columns.map((column, index) => [column.name, row[index]]))
     );
 
     const agents = rawRows.map((row) => {
@@ -235,9 +229,7 @@ ConversationHealth
         mode: 'error',
         message: 'Live telemetry could not be retrieved.',
         technicalDetail:
-          process.env.NODE_ENV === 'development'
-            ? error.message
-            : undefined,
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
       },
     };
   }
