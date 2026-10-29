@@ -1,8 +1,7 @@
 {
   "name": "agent-assurance-api",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "dependencies": {
-    "@azure/identity": "^4.13.3",
-    "@azure/monitor-query-logs": "^1.0.0"
+    "@azure/identity": "^4.13.3"
   }
 }

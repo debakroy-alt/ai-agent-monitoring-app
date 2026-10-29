@@ -1,0 +1,36 @@
+[
+  {
+    "id": "REPLACE_WITH_TELEMETRY_AGENT_ID_1",
+    "aliases": ["Media PR Report Generator"],
+    "displayName": "Media PR Report Generator",
+    "purpose": "Drafts media and PR summary reports from approved internal sources.",
+    "department": "Marketing",
+    "location": "US",
+    "businessOwner": "REPLACE_WITH_BUSINESS_OWNER",
+    "technicalOwner": "REPLACE_WITH_TECHNICAL_OWNER",
+    "platform": "Microsoft Copilot Studio",
+    "riskTier": "Medium",
+    "approvalStatus": "Approved",
+    "productionSince": "2026-09-15",
+    "monthlyBudgetUsd": 5,
+    "allowedConnectors": ["SharePoint"],
+    "tags": ["internal"]
+  },
+  {
+    "id": "REPLACE_WITH_TELEMETRY_AGENT_ID_2",
+    "aliases": [],
+    "displayName": "Privacy PR Agent",
+    "purpose": "Answers privacy policy questions for internal teams.",
+    "department": "Risk & Compliance",
+    "location": "US",
+    "businessOwner": "REPLACE_WITH_BUSINESS_OWNER",
+    "technicalOwner": "REPLACE_WITH_TECHNICAL_OWNER",
+    "platform": "Microsoft Copilot Studio",
+    "riskTier": "High",
+    "approvalStatus": "Approved",
+    "productionSince": "2026-10-01",
+    "monthlyBudgetUsd": 5,
+    "allowedConnectors": ["SharePoint"],
+    "tags": ["internal"]
+  }
+]
