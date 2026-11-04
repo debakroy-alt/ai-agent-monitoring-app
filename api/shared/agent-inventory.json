@@ -13,6 +13,8 @@
     "approvalStatus": "Approved",
     "productionSince": "2026-09-15",
     "monthlyBudgetUsd": 5,
+    "billingModel": "copilot-credits",
+    "creditsPerResponse": 2,
     "allowedConnectors": ["SharePoint"],
     "tags": ["internal"]
   },
@@ -30,6 +32,8 @@
     "approvalStatus": "Approved",
     "productionSince": "2026-10-01",
     "monthlyBudgetUsd": 5,
+    "billingModel": "copilot-credits",
+    "creditsPerResponse": 2,
     "allowedConnectors": ["SharePoint"],
     "tags": ["internal"]
   }
