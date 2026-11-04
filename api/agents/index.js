@@ -8,7 +8,7 @@
  *
  * No value that drives a red / amber / green status is entered manually.
  *
- * Identity stability (fixes "the agents shown keep changing"):
+ * Identity stability:
  *   - Every conversation is mapped to ONE agent deterministically (sorted sets,
  *     no take_any), and bot display names are mapped to their schema name.
  *   - Every known name (schema, display name, aliases) is mapped to the
@@ -213,27 +213,57 @@ union isfuzzy=true
     by AgentId, Model`,
 };
 
-async function runQuery(workspaceId, token, query) {
-  const response = await fetch(`https://api.loganalytics.azure.com/v1/workspaces/${workspaceId}/query`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'wait=120' },
-    body: JSON.stringify({ query }),
-    signal: AbortSignal.timeout(130000),
-  });
+/**
+ * The Log Analytics REST API returns `dynamic` columns (arrays such as Channels,
+ * BotNames, RawKeys) as JSON text, not as arrays. Convert them back so the rest
+ * of the code can treat them as arrays. (Missing this caused the
+ * "Live telemetry could not be retrieved" error: `.filter is not a function`.)
+ */
+function parseCell(value, type) {
+  if (type !== 'dynamic' || typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+async function runQuery(workspaceId, token, query, name) {
+  let response;
+  try {
+    response = await fetch(`https://api.loganalytics.azure.com/v1/workspaces/${workspaceId}/query`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'wait=120' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(130000),
+    });
+  } catch (e) {
+    throw stageError(`query "${name}"`, e.name === 'TimeoutError' ? 'timed out' : e.message);
+  }
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result?.error?.message || `Log Analytics returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const inner = result?.error?.innererror?.message || result?.error?.details?.[0]?.innererror?.message;
+    throw stageError(`query "${name}"`, `${result?.error?.message || `HTTP ${response.status}`}${inner ? ` — ${inner}` : ''}`);
+  }
   const table = result.tables?.[0];
   if (!table) return [];
-  return table.rows.map((row) => Object.fromEntries(table.columns.map((c, i) => [c.name, row[i]])));
+  return table.rows.map((row) => Object.fromEntries(table.columns.map((c, i) => [c.name, parseCell(row[i], c.type)])));
+}
+
+function stageError(stage, message) {
+  const e = new Error(`${stage}: ${message}`);
+  e.stage = stage;
+  return e;
 }
 
 const groupBy = (rows) => rows.reduce((acc, r) => ((acc[r.AgentId] ||= []).push(r), acc), {});
 const byAgent = (rows) => Object.fromEntries(rows.map((r) => [r.AgentId, r]));
+const asArray = (v) => (Array.isArray(v) ? v : v === null || v === undefined || v === '' ? [] : [v]);
 
 async function buildPayload(days) {
   const started = Date.now();
   const workspaceId = process.env.LOG_ANALYTICS_WORKSPACE_ID;
-  if (!workspaceId) throw new Error('LOG_ANALYTICS_WORKSPACE_ID is not configured.');
+  if (!workspaceId) throw stageError('configuration', 'LOG_ANALYTICS_WORKSPACE_ID is not set');
   const config = readConfig();
 
   const inventory = await loadInventory(credential).catch((e) => ({ source: 'error', sourceLabel: e.message, records: [] }));
@@ -249,64 +279,74 @@ async function buildPayload(days) {
     slow: config.slowReplySeconds,
   };
 
-  const { token } = await credential.getToken('https://api.loganalytics.io/.default');
-  const q = (name) => runQuery(workspaceId, token, QUERIES[name](w));
+  let token;
+  try {
+    ({ token } = await credential.getToken('https://api.loganalytics.io/.default'));
+  } catch (e) {
+    throw stageError('sign-in to Log Analytics', e.message);
+  }
+  const q = (name) => runQuery(workspaceId, token, QUERIES[name](w), name);
   const soft = (p) => p.then((rows) => ({ ok: true, rows }), (e) => ({ ok: false, rows: [], error: e.message }));
   const [summary, turns, series, errors, costResult] = await Promise.all([q('summary'), q('turns'), q('series'), soft(q('errors')), soft(q('cost'))]);
 
-  const turnsBy = byAgent(turns);
-  const seriesBy = groupBy(series);
-  const errorsBy = groupBy(errors.rows);
-  const costBy = groupBy(costResult.rows);
-  const now = endMs;
+  try {
+    const turnsBy = byAgent(turns);
+    const seriesBy = groupBy(series);
+    const errorsBy = groupBy(errors.rows);
+    const costBy = groupBy(costResult.rows);
+    const now = endMs;
 
-  const keys = new Set([...summary.map((r) => r.AgentId), ...Object.keys(costBy)]);
-  const summaryBy = byAgent(summary);
-  const agents = [...keys].map((key) => {
-    const row = summaryBy[key] || { AgentId: key };
-    row.TopErrorCodes = (errorsBy[key] || [])
-      .sort((a, b) => b.Count - a.Count || a.ErrorCode.localeCompare(b.ErrorCode))
-      .slice(0, 6)
-      .map((e) => ({ code: e.ErrorCode, count: Number(e.Count) }));
-    return buildAgent({
-      key,
-      row,
-      turns: turnsBy[key],
-      series: fillSeries(seriesBy[key] || [], w.start, w.end, days),
-      costRows: costBy[key] || [],
-      inv: matchInventory(inventory.records, key),
-      days,
-      now,
-      config,
+    const keys = new Set([...summary.map((r) => r.AgentId), ...Object.keys(costBy)].filter(Boolean));
+    const summaryBy = byAgent(summary);
+    const agents = [...keys].map((key) => {
+      const row = { ...(summaryBy[key] || { AgentId: key }) };
+      for (const col of ['Channels', 'BotNames', 'RawKeys']) row[col] = asArray(row[col]);
+      row.TopErrorCodes = (errorsBy[key] || [])
+        .sort((a, b) => b.Count - a.Count || String(a.ErrorCode).localeCompare(String(b.ErrorCode)))
+        .slice(0, 6)
+        .map((e) => ({ code: e.ErrorCode, count: Number(e.Count) }));
+      return buildAgent({
+        key,
+        row,
+        turns: turnsBy[key],
+        series: fillSeries(seriesBy[key] || [], w.start, w.end, days),
+        costRows: costBy[key] || [],
+        inv: matchInventory(inventory.records, key),
+        days,
+        now,
+        config,
+      });
     });
-  });
 
-  // Registered agents with no telemetry in the period are still shown (grey) so gaps are visible.
-  const seen = new Set(agents.map((a) => a.id.toLowerCase()));
-  const silent = inventory.records
-    .filter((r) => !seen.has(String(r.key).toLowerCase()))
-    .map((inv) => buildAgent({ key: inv.key, row: {}, series: fillSeries([], w.start, w.end, days), inv, days, now, config }));
+    // Registered agents with no telemetry in the period are still shown (grey) so gaps are visible.
+    const seen = new Set(agents.map((a) => a.id.toLowerCase()));
+    const silent = inventory.records
+      .filter((r) => !seen.has(String(r.key).toLowerCase()))
+      .map((inv) => buildAgent({ key: inv.key, row: {}, series: fillSeries([], w.start, w.end, days), inv, days, now, config }));
 
-  return {
-    mode: 'live',
-    lookbackDays: days,
-    window: { start: w.start, end: w.end },
-    generatedAt: new Date(endMs).toISOString(),
-    queryMs: Date.now() - started,
-    sources: {
-      telemetry: 'Application Insights (Log Analytics workspace)',
-      inventory: inventory.source,
-      inventoryLabel: inventory.sourceLabel,
-      inventoryRecords: inventory.records.length,
-      aliasClashes: clashes,
-      costTelemetry: costResult.ok ? (costResult.rows.length ? 'connected' : 'no gen_ai token data') : 'unavailable',
-      pricing: `Copilot Credits at $${config.creditPriceUsd}/credit · ${Object.keys(config.modelPrices).length ? 'custom' : 'default'} model price list`,
-      slowReplySeconds: config.slowReplySeconds,
-      creditsPerResponse: config.defaultCreditsPerResponse,
-    },
-    library: publicLibrary(),
-    agents: sortAgents([...agents, ...silent]),
-  };
+    return {
+      mode: 'live',
+      lookbackDays: days,
+      window: { start: w.start, end: w.end },
+      generatedAt: new Date(endMs).toISOString(),
+      queryMs: Date.now() - started,
+      sources: {
+        telemetry: 'Application Insights (Log Analytics workspace)',
+        inventory: inventory.source,
+        inventoryLabel: inventory.sourceLabel,
+        inventoryRecords: inventory.records.length,
+        aliasClashes: clashes,
+        costTelemetry: costResult.ok ? (costResult.rows.length ? 'connected' : 'no gen_ai token data') : 'unavailable',
+        pricing: `Copilot Credits at $${config.creditPriceUsd}/credit · ${Object.keys(config.modelPrices).length ? 'custom' : 'default'} model price list`,
+        slowReplySeconds: config.slowReplySeconds,
+        creditsPerResponse: config.defaultCreditsPerResponse,
+      },
+      library: publicLibrary(),
+      agents: sortAgents([...agents, ...silent]),
+    };
+  } catch (e) {
+    throw e.stage ? e : stageError('processing the results', e.message);
+  }
 }
 
 // ---------------------------------------------------------------- handler
@@ -330,13 +370,16 @@ module.exports = async function (context, req) {
     };
   } catch (error) {
     context.log.error('Live telemetry query failed.', error);
+    // Name the failing step (safe to show) so problems can be diagnosed from the banner.
+    // Full error text only when SHOW_ERROR_DETAILS=true or in development.
+    const showDetail = process.env.SHOW_ERROR_DETAILS === 'true' || process.env.NODE_ENV === 'development';
     context.res = {
       status: 500,
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
       body: {
         mode: 'error',
-        message: 'Live telemetry could not be retrieved.',
-        technicalDetail: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        message: showDetail ? error.message : `Failed at: ${error.stage || 'unexpected error'}. See the Function logs for details.`,
+        stage: error.stage || 'unexpected',
       },
     };
   }
@@ -346,3 +389,4 @@ module.exports = async function (context, req) {
 module.exports.QUERIES = QUERIES;
 module.exports.aliasTable = aliasTable;
 module.exports.kqlString = kqlString;
+module.exports.parseCell = parseCell;
