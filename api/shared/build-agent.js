@@ -1,7 +1,7 @@
 /**
- * Turns aggregated telemetry rows + an inventory record into the agent object
- * the dashboard renders. Shared by the live API (api/agents) and the demo
- * generator (tools/gen-demo.cjs) so demo data always follows the same rules.
+ * Turns aggregated telemetry rows + an agent profile into the agent object the
+ * dashboard renders. Shared by the live API (api/agents) and the demo generator
+ * (tools/gen-demo.cjs) so demo data always follows exactly the same rules.
  */
 const { evaluate, worstStatus, COMPLIANCE_CHECKS } = require('./metrics-registry');
 
@@ -14,8 +14,8 @@ const DEFAULT_CONFIG = {
 
 /**
  * Default model prices, USD per 1M tokens (Azure OpenAI / Foundry, Global Standard).
- * Prices change often — override with MODEL_PRICES_JSON, e.g.
- *   {"gpt-4o":{"in":2.5,"out":10},"gpt-4.1-mini":{"in":0.4,"out":1.6}}
+ * Prices change — confirm for your region or override with MODEL_PRICES_JSON, e.g.
+ *   {"gpt-4o":{"in":2.5,"out":10}}
  * Longest matching prefix wins, so "gpt-4o-mini-2024-07-18" matches "gpt-4o-mini".
  */
 const DEFAULT_MODEL_PRICES = {
@@ -37,6 +37,8 @@ function priceFor(model, prices) {
 
 const num = (v) => (v === null || v === undefined || v === '' ? 0 : Number(v) || 0);
 const pct = (n, d) => (d > 0 ? (100 * n) / d : null);
+const arr = (v) => (Array.isArray(v) ? v : []);
+const fmt = (n) => Number(n || 0).toLocaleString('en-US');
 
 function daysSince(dateString, now) {
   if (!dateString) return null;
@@ -44,18 +46,14 @@ function daysSince(dateString, now) {
   return Number.isNaN(t) ? null : Math.max(0, Math.floor((now - t) / 86400000));
 }
 
-function detectPlatform(inv, costRows) {
-  if (inv?.platform) return inv.platform;
-  return costRows?.length ? 'Azure AI Foundry' : 'Microsoft Copilot Studio';
-}
-
-function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], inv = null, days, now = Date.now(), config = {} }) {
+function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], profile = null, days, now = Date.now(), config = {} }) {
   const cfg = { ...DEFAULT_CONFIG, ...config, modelPrices: { ...DEFAULT_MODEL_PRICES, ...(config.modelPrices || {}) } };
+  const inv = profile || {};
   const conversations = num(row.Conversations);
   const engaged = num(row.Engaged);
   const userTurns = num(turns?.UserTurns);
   const answered = num(turns?.AnsweredTurns);
-  const platform = detectPlatform(inv, costRows);
+  const platform = inv.platform || (costRows.length ? 'Azure AI Foundry' : 'Microsoft Copilot Studio');
   const isFoundry = /foundry|sdk|azure ai/i.test(platform);
   const periodText = days === 1 ? 'the last 24 hours' : `the last ${days} days`;
 
@@ -65,20 +63,18 @@ function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], i
   const depFailed = num(row.DependencyFailed);
   const health = [
     evaluate('agent_availability', { value: pct(answered, userTurns), sample: userTurns,
-      note: `${(userTurns - answered).toLocaleString('en-US')} of ${userTurns.toLocaleString('en-US')} user messages got no reply` }),
+      note: `${fmt(userTurns - answered)} of ${fmt(userTurns)} user messages got no reply` }),
     evaluate('task_completion', { value: pct(num(row.Resolved), engaged), sample: engaged,
-      note: `${num(row.Resolved).toLocaleString('en-US')} of ${engaged.toLocaleString('en-US')} engaged conversations resolved · ${num(row.Escalated)} escalated or fell back` }),
+      note: `${fmt(row.Resolved)} of ${fmt(engaged)} engaged conversations resolved · ${fmt(row.Escalated)} escalated or fell back` }),
     evaluate('p95_latency', { value: turns?.P95LatencySec ?? null, sample: answered,
-      note: turns?.P50LatencySec != null ? `Typical (median) reply ${Math.round(turns.P50LatencySec * 10) / 10}s · ${answered.toLocaleString('en-US')} answered messages` : null }),
+      note: turns?.P50LatencySec != null ? `Typical (median) reply ${Math.round(turns.P50LatencySec * 10) / 10}s · ${fmt(answered)} answered messages` : null }),
     evaluate('timeout_rate', { value: pct(num(turns?.SlowTurns), answered), sample: answered,
-      note: `${num(turns?.SlowTurns)} replies slower than ${cfg.slowReplySeconds}s` }),
+      note: `${fmt(turns?.SlowTurns)} replies slower than ${cfg.slowReplySeconds}s` }),
     evaluate('failed_execution_rate', { value: pct(num(row.HealthFailed), engaged), sample: engaged,
-      note: `${num(row.HealthFailed)} of ${engaged.toLocaleString('en-US')} engaged conversations recorded an error` }),
+      note: `${fmt(row.HealthFailed)} of ${fmt(engaged)} engaged conversations recorded an error` }),
     modelCalls > 0 && engaged === 0
-      ? evaluate('dependency_failure_rate', { value: pct(failedCalls, modelCalls), sample: modelCalls,
-          note: `${failedCalls} of ${modelCalls} model calls failed` })
-      : evaluate('dependency_failure_rate', { value: pct(depFailed, engaged), sample: engaged,
-          note: `${depFailed} conversation(s) hit a flow, connector or tool failure` }),
+      ? evaluate('dependency_failure_rate', { value: pct(failedCalls, modelCalls), sample: modelCalls, note: `${failedCalls} of ${modelCalls} model calls failed` })
+      : evaluate('dependency_failure_rate', { value: pct(depFailed, engaged), sample: engaged, note: `${depFailed} conversation(s) hit a flow, connector or tool failure` }),
     evaluate('avg_retries', {}),
   ];
 
@@ -89,18 +85,17 @@ function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], i
   const dlp = num(row.DlpBlocks);
   const per1k = engaged > 0 ? (1000 * jail) / engaged : null;
   const riskMetrics = [
-    evaluate('prompt_injection_attempts', { value: per1k, sample: engaged,
-      display: `${jail} blocked`, note: `${jail} attempt(s) in ${periodText} = ${per1k === null ? '—' : Math.round(per1k * 10) / 10} per 1,000 conversations` }),
-    evaluate('indirect_attacks', { value: indirect, sample: engaged,
-      note: indirect ? 'Review the knowledge sources this agent reads' : `None in ${periodText}` }),
-    evaluate('content_safety_blocks', { value: pct(harmful, engaged), sample: engaged,
-      note: `${harmful} conversation(s) filtered` }),
+    evaluate('prompt_injection_attempts', { value: per1k, sample: engaged, display: `${jail} blocked`,
+      status: engaged > 0 ? (jail === 0 ? 'green' : jail >= 3 && per1k > 10 ? 'red' : 'amber') : null,
+      note: `${jail} attempt(s) in ${periodText} = ${per1k === null ? '—' : Math.round(per1k * 10) / 10} per 1,000 conversations` }),
+    evaluate('indirect_attacks', { value: indirect, sample: engaged, note: indirect ? 'Review the knowledge sources this agent reads' : `None in ${periodText}` }),
+    evaluate('content_safety_blocks', { value: pct(harmful, engaged), sample: engaged, note: `${harmful} conversation(s) filtered` }),
     evaluate('dlp_violations', { value: dlp, sample: engaged, note: dlp ? 'Agent attempted actions blocked by a DLP policy' : `None in ${periodText}` }),
     evaluate('sensitive_data_exposure', { note: 'Requires Microsoft Purview DSPM for AI connection' }),
     evaluate('unapproved_tool_calls', {
-      note: inv?.allowedConnectors?.length
-        ? `Allowed list defined (${inv.allowedConnectors.join(', ')}); tool-call telemetry not yet available`
-        : 'Define allowedConnectors in the AI inventory, then connect tool-call telemetry' }),
+      note: inv.allowedConnectors?.length
+        ? `Allowed list recorded (${inv.allowedConnectors.join(', ')}); tool-call telemetry not yet available`
+        : 'Record allowed connectors on the agent profile, then connect tool-call telemetry' }),
   ];
 
   // COST --------------------------------------------------------------
@@ -109,13 +104,13 @@ function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], i
   let spendUsd = null;
   let billing;
   const costMetrics = [];
-  const billingModel = (inv?.billingModel || '').toLowerCase();
+  const billingModel = String(inv.billingModel || '').toLowerCase();
 
-  if (isFoundry || costRows.length) {
+  if (billingModel !== 'm365-copilot' && (isFoundry || billingModel === 'tokens' || costRows.length)) {
     billing = 'tokens';
     const inTok = costRows.reduce((s, r) => s + num(r.InputTokens), 0);
     const outTok = costRows.reduce((s, r) => s + num(r.OutputTokens), 0);
-    let unpriced = [];
+    const unpriced = [];
     if (costRows.length) {
       tokens = inTok + outTok;
       spendUsd = 0;
@@ -126,8 +121,7 @@ function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], i
       }
       if (unpriced.length === costRows.length) spendUsd = null;
       costMetrics.push(evaluate('token_consumption', { value: tokens,
-        note: `${inTok.toLocaleString('en-US')} in · ${outTok.toLocaleString('en-US')} out · ${modelCalls.toLocaleString('en-US')} model calls` +
-          (unpriced.length ? ` · no price for ${unpriced.join(', ')}` : '') }));
+        note: `${fmt(inTok)} in · ${fmt(outTok)} out · ${fmt(modelCalls)} model calls` + (unpriced.length ? ` · no price for ${unpriced.join(', ')}` : '') }));
     } else {
       costMetrics.push(evaluate('token_consumption', { available: false, note: 'No gen_ai token telemetry received for this agent' }));
     }
@@ -135,17 +129,17 @@ function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], i
     billing = 'included';
     spendUsd = 0;
     costMetrics.push(evaluate('copilot_credits', { value: 0, display: 'Included',
-      note: 'Employee-facing use by Microsoft 365 Copilot-licensed users is not charged (fair-use limits apply)' }));
+      note: 'Employee use by Microsoft 365 Copilot-licensed users is not charged (fair-use limits apply)' }));
   } else {
     billing = 'credits';
-    const perResponse = inv?.creditsPerResponse ?? cfg.defaultCreditsPerResponse;
+    const perResponse = inv.creditsPerResponse ?? cfg.defaultCreditsPerResponse;
     credits = answered * perResponse;
     spendUsd = credits * cfg.creditPriceUsd;
-    costMetrics.push(evaluate('copilot_credits', { value: credits, sample: answered,
-      note: `${answered.toLocaleString('en-US')} answered messages × ${perResponse} credits · ≈ $${spendUsd.toFixed(2)} at $${cfg.creditPriceUsd}/credit` }));
+    costMetrics.push(evaluate('copilot_credits', { value: credits,
+      note: `${fmt(answered)} answered messages × ${perResponse} credits · ≈ $${spendUsd.toFixed(2)} at $${cfg.creditPriceUsd}/credit` }));
   }
 
-  const budget = inv?.monthlyBudgetUsd ? (inv.monthlyBudgetUsd * days) / 30 : null;
+  const budget = inv.monthlyBudgetUsd ? (inv.monthlyBudgetUsd * days) / 30 : null;
   if (billing === 'included') {
     costMetrics.push(evaluate('spend', { value: 0, display: 'Included', status: 'green', note: 'Covered by Microsoft 365 Copilot licences' }));
   } else if (engaged === 0 && !tokens) {
@@ -153,14 +147,13 @@ function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], i
   } else if (spendUsd === null) {
     costMetrics.push(evaluate('spend', { available: false, note: 'No priced usage data for this agent yet' }));
   } else if (!budget) {
-    costMetrics.push(evaluate('spend', { available: false, note: `≈ $${spendUsd.toFixed(2)} spent; no monthlyBudgetUsd in the AI inventory to compare against` }));
+    costMetrics.push(evaluate('spend', { available: false, note: `≈ $${spendUsd.toFixed(2)} spent; no monthly budget on the agent profile to compare against` }));
   } else {
-    costMetrics.push(evaluate('spend', { value: pct(spendUsd, budget),
-      note: `≈ $${spendUsd.toFixed(2)} of $${budget.toFixed(2)} budget for ${periodText}` }));
+    costMetrics.push(evaluate('spend', { value: pct(spendUsd, budget), note: `≈ $${spendUsd.toFixed(2)} of $${budget.toFixed(2)} budget for ${periodText}` }));
   }
   costMetrics.push(
     spendUsd !== null && engaged > 0
-      ? evaluate('cost_per_conversation', { value: spendUsd / engaged, note: `${engaged.toLocaleString('en-US')} engaged conversations` })
+      ? evaluate('cost_per_conversation', { value: spendUsd / engaged, note: `${fmt(engaged)} engaged conversations` })
       : evaluate('cost_per_conversation', { available: false, note: spendUsd === null ? 'Needs priced usage data' : 'No conversations in the period' })
   );
 
@@ -173,71 +166,103 @@ function buildAgent({ key, row = {}, turns = null, series = [], costRows = [], i
   // An agent is only called Healthy when we could actually measure whether it works.
   if (statuses.overall === 'green' && statuses.health === 'unknown') statuses.overall = 'unknown';
 
-  // COMPLIANCE (automatic: telemetry vs inventory) ---------------------
+  // AI POLICY (automatic: telemetry vs profile) ------------------------
   const isProduction = num(row.ProductionConversations) > 0;
   const compliance = COMPLIANCE_CHECKS.map((check) => {
     let pass;
     let detail;
     switch (check.id) {
-      case 'registered':
-        pass = !!inv; detail = inv ? 'Inventory record found' : 'No inventory record matches this agent'; break;
+      case 'profile': {
+        const missing = [!inv.purpose && 'purpose', !inv.department && 'department'].filter(Boolean);
+        pass = !missing.length; detail = pass ? inv.department : `Missing ${missing.join(' and ')}`; break;
+      }
       case 'owners': {
-        const missing = [!inv?.businessOwner && 'business', !inv?.technicalOwner && 'technical'].filter(Boolean);
+        const missing = [!inv.businessOwner && 'business', !inv.technicalOwner && 'technical'].filter(Boolean);
         pass = !missing.length; detail = pass ? `${inv.businessOwner} / ${inv.technicalOwner}` : `Missing ${missing.join(' and ')} owner`; break;
       }
       case 'risk_tier':
-        pass = !!inv?.riskTier; detail = inv?.riskTier ? `${inv.riskTier} risk` : 'Not assigned'; break;
+        pass = !!inv.riskTier; detail = inv.riskTier ? `${inv.riskTier} risk` : 'Not assigned'; break;
       case 'approved':
-        pass = !isProduction || /^approved$/i.test(String(inv?.approvalStatus || '').trim());
-        detail = isProduction ? `Used in production · status: ${inv?.approvalStatus || 'none'}` : 'Not used in production'; break;
-      case 'telemetry':
-        pass = conversations > 0; detail = conversations > 0 ? 'Telemetry received in the period' : 'No telemetry in the period'; break;
+        pass = !isProduction || /^approved$/i.test(String(inv.approvalStatus || '').trim());
+        detail = isProduction ? `Used in production · status: ${inv.approvalStatus || 'none'}` : 'Not used in production'; break;
       default:
         pass = true;
     }
     return { id: check.id, name: check.name, pass, detail };
   });
-  const compliant = compliance.every((c) => c.pass);
 
   const alerts = [...health, ...riskMetrics, ...costMetrics]
     .filter((m) => m.status === 'red' || m.status === 'amber')
-    .sort((a, b) => (a.status === 'red' ? -1 : 0) - (b.status === 'red' ? -1 : 0))
+    .sort((a, b) => (a.status === 'red' ? 0 : 1) - (b.status === 'red' ? 0 : 1))
     .map((m) => ({ id: m.id, metric: m.name, pillar: m.pillar, status: m.status, value: m.value, threshold: m.threshold }));
 
-  const botNames = (row.BotNames || []).filter(Boolean).sort();
+  const botNames = arr(row.BotNames).filter(Boolean).sort();
   return {
     id: key,
-    name: inv?.displayName || botNames[0] || key,
-    telemetryNames: [...new Set([key, ...botNames, ...(row.RawKeys || [])])],
-    purpose: inv?.purpose || 'Not registered in the AI inventory — purpose unknown.',
-    department: inv?.department || 'Unassigned',
-    location: inv?.location || 'Unassigned',
-    businessOwner: inv?.businessOwner || null,
-    technicalOwner: inv?.technicalOwner || null,
+    connected: true,
+    name: inv.displayName || botNames[0] || key,
+    telemetryNames: [...new Set([key, ...botNames, ...arr(row.RawKeys)])].filter(Boolean),
+    purpose: inv.purpose || null,
+    department: inv.department || 'Unassigned',
+    location: inv.location || 'Unassigned',
+    businessOwner: inv.businessOwner || null,
+    technicalOwner: inv.technicalOwner || null,
     platform,
-    riskTier: inv?.riskTier || null,
-    approvalStatus: inv?.approvalStatus || null,
-    registered: !!inv,
+    riskTier: inv.riskTier || null,
+    approvalStatus: inv.approvalStatus || null,
     environment: isProduction ? 'Production' : conversations > 0 ? 'Test only' : 'No activity',
-    channels: row.Channels || [],
-    productionDays: daysSince(inv?.productionSince, now),
+    channels: arr(row.Channels),
+    productionDays: daysSince(inv.productionSince, now),
     lastSeen: row.LastSeen || null,
     volume: engaged,
     allConversations: conversations,
     userTurns,
     errorEvents: num(row.ErrorEvents),
-    topErrorCodes: row.TopErrorCodes || [],
+    topErrorCodes: arr(row.TopErrorCodes),
     billing,
     tokens,
     credits,
     spendUsd,
     budgetUsd: budget,
+    raw: {
+      engaged,
+      resolved: num(row.Resolved),
+      healthFailed: num(row.HealthFailed),
+      dependencyFailed: depFailed,
+      userTurns,
+      answered,
+      slow: num(turns?.SlowTurns),
+      p95: turns?.P95LatencySec ?? null,
+      jailbreaks: jail,
+      indirect,
+      harmful,
+      dlp,
+    },
     series,
     statuses,
-    compliant,
+    compliant: compliance.every((c) => c.pass),
     compliance,
     alerts,
     metrics: { health, risk: riskMetrics, cost: costMetrics },
+    profile: {
+      id: inv.id || key,
+      displayName: inv.displayName || null,
+      aliases: inv.aliases || [],
+      purpose: inv.purpose || '',
+      department: inv.department || '',
+      location: inv.location || '',
+      businessOwner: inv.businessOwner || '',
+      technicalOwner: inv.technicalOwner || '',
+      platform: inv.platform || '',
+      riskTier: inv.riskTier || '',
+      approvalStatus: inv.approvalStatus || '',
+      productionSince: inv.productionSince || '',
+      monthlyBudgetUsd: inv.monthlyBudgetUsd ?? '',
+      billingModel: inv.billingModel || '',
+      creditsPerResponse: inv.creditsPerResponse ?? '',
+      allowedConnectors: inv.allowedConnectors || [],
+      notes: inv.notes || '',
+    },
   };
 }
 
@@ -250,13 +275,7 @@ function fillSeries(rows, startIso, endIso, days) {
   const out = [];
   for (let t = start; t <= end; t += step) {
     const r = byT.get(t) || {};
-    out.push({
-      t: new Date(t).toISOString(),
-      conversations: num(r.Conversations),
-      failed: num(r.Failed),
-      completed: num(r.Completed),
-      blocked: num(r.Blocked),
-    });
+    out.push({ t: new Date(t).toISOString(), conversations: num(r.Conversations), failed: num(r.Failed), completed: num(r.Completed), blocked: num(r.Blocked) });
   }
   return out;
 }
@@ -265,12 +284,25 @@ const STATUS_RANK = { red: 0, amber: 1, green: 2, unknown: 3 };
 /** Deterministic order: worst status first, then most conversations, then name. */
 function sortAgents(agents) {
   return agents.sort(
-    (a, b) =>
-      STATUS_RANK[a.statuses.overall] - STATUS_RANK[b.statuses.overall] ||
-      b.volume - a.volume ||
-      a.name.localeCompare(b.name) ||
-      a.id.localeCompare(b.id)
+    (a, b) => STATUS_RANK[a.statuses.overall] - STATUS_RANK[b.statuses.overall] || b.volume - a.volume || a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
   );
 }
 
-module.exports = { buildAgent, fillSeries, sortAgents, priceFor, DEFAULT_MODEL_PRICES, DEFAULT_CONFIG };
+/** Summary of an agent that sends telemetry but is not connected. */
+function buildDiscovered({ key, row = {}, suggestion = null }) {
+  const names = [...new Set([...arr(row.BotNames), ...arr(row.RawKeys)].filter(Boolean))];
+  return {
+    id: key,
+    name: suggestion?.displayName || arr(row.BotNames)[0] || key,
+    names,
+    conversations: num(row.Engaged),
+    allConversations: num(row.Conversations),
+    environment: num(row.ProductionConversations) > 0 ? 'Production' : 'Test only',
+    lastSeen: row.LastSeen || null,
+    suggestion: suggestion
+      ? { ...suggestion, key: undefined }
+      : { id: key, displayName: arr(row.BotNames)[0] || key, aliases: names.filter((n) => n.toLowerCase() !== String(key).toLowerCase()) },
+  };
+}
+
+module.exports = { buildAgent, buildDiscovered, fillSeries, sortAgents, priceFor, DEFAULT_MODEL_PRICES, DEFAULT_CONFIG };

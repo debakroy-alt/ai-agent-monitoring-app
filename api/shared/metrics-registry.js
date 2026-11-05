@@ -1,22 +1,19 @@
 /**
  * Metrics library — single source of truth for every metric on the dashboard.
  *
- * A common library maintained once; each agent "picks" the metrics that apply
- * to it (by platform / tags). Change a threshold here and every agent, tile,
- * chart and the in-app guide picks it up. Nothing here is entered per agent by
- * hand; values are calculated from telemetry at request time.
+ * A common library maintained once; every connected agent is measured against
+ * it. Change a threshold here and every agent, card, chart and the in-app guide
+ * picks it up. Nothing is entered per agent by hand; values are calculated from
+ * telemetry at request time.
  *
  * availability:
  *   'live'          – calculated today from Copilot Studio -> Application Insights
- *   'conditional'   – calculated only when the source is connected (e.g. token telemetry)
+ *   'conditional'   – calculated only when the source is connected (e.g. token telemetry, budget)
  *   'not-available' – defined, but no automatic source exists yet (shown grey, never green)
  *
  * thresholds:
  *   higherIsBetter: true  -> green if value >= green, amber if value >= amber, else red
  *   higherIsBetter: false -> green if value <= green, amber if value <= amber, else red
- *
- * Rationale / references for thresholds are kept next to each metric (`basis`)
- * and shown in the Metric Library so they can be challenged by the business.
  */
 
 const PILLARS = {
@@ -32,18 +29,17 @@ const PILLARS = {
     question: 'Is the agent behaving safely?',
     definition:
       'Safety and security signals raised by the platform guardrails (jailbreaks, prompt attacks hidden in documents, harmful content, ' +
-      'data-policy blocks). Baseline signals apply to every agent; use-case rules (e.g. an HR agent may only call Workday) are added per agent.',
+      'data-policy blocks).',
   },
   cost: {
     name: 'Cost',
     question: 'Is the agent affordable?',
     definition:
-      'Estimated consumption and spend in the period, compared with the agent budget held in the AI inventory. ' +
+      'Estimated consumption and spend in the period, compared with the agent budget. ' +
       'Copilot Studio agents are estimated from Copilot Credits; Foundry agents from token usage × model price.',
   },
 };
 
-// Operational Health = Availability + Completion + Latency + Error/Retry + Dependency Health
 const HEALTH_COMPONENTS = {
   availability: 'Availability',
   completion: 'Completion',
@@ -63,13 +59,12 @@ const METRICS = [
     unit: '%',
     definition: 'Share of user messages that received a reply from the agent.',
     formula: 'answered user messages ÷ user messages × 100',
-    source: 'Application Insights · AppEvents (BotMessageReceived → BotMessageSend)',
+    source: 'Application Insights · AppEvents (BotMessageReceived → BotMessageSend, message activities only)',
     thresholds: { higherIsBetter: true, green: 99, amber: 95 },
     basis: 'Common SLO practice for interactive services: ≥99% green; below 95% means 1 in 20 questions goes unanswered.',
     minSample: 10,
     sampleLabel: 'user messages',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'task_completion',
@@ -88,7 +83,6 @@ const METRICS = [
     minSample: 5,
     sampleLabel: 'engaged conversations',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'p95_latency',
@@ -101,12 +95,10 @@ const METRICS = [
     formula: 'percentile(reply time − message time, 95)',
     source: 'Application Insights · AppEvents (BotMessageReceived → BotMessageSend)',
     thresholds: { higherIsBetter: false, green: 10, amber: 20 },
-    basis:
-      'Nielsen’s response-time limits: ~10 seconds is the limit for keeping a user’s attention on the dialogue. Generative answers with knowledge search typically take several seconds.',
+    basis: 'Nielsen’s response-time limits: ~10 seconds is the limit for keeping a user’s attention on the dialogue.',
     minSample: 10,
     sampleLabel: 'answered messages',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'timeout_rate',
@@ -123,7 +115,6 @@ const METRICS = [
     minSample: 10,
     sampleLabel: 'answered messages',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'failed_execution_rate',
@@ -141,7 +132,6 @@ const METRICS = [
     minSample: 5,
     sampleLabel: 'engaged conversations',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'dependency_failure_rate',
@@ -159,7 +149,6 @@ const METRICS = [
     minSample: 5,
     sampleLabel: 'engaged conversations',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'avg_retries',
@@ -174,7 +163,6 @@ const METRICS = [
     thresholds: { higherIsBetter: false, green: 0.2, amber: 0.5 },
     minSample: 5,
     availability: 'not-available',
-    appliesTo: ['all'],
   },
 
   // ------------------------------------------------------------------ RISK
@@ -189,13 +177,13 @@ const METRICS = [
       'Messages blocked by the platform guardrails because the user tried to override the agent’s instructions (jailbreak / direct prompt injection, error sub-code OpenAIJailBreak).',
     formula: 'blocked jailbreak attempts ÷ engaged conversations × 1,000',
     source: 'Application Insights · AppEvents (OnErrorLog: ContentFiltered / OpenAIJailBreak)',
-    thresholds: { higherIsBetter: false, green: 1, amber: 5 },
+    thresholds: { higherIsBetter: false, green: 0, amber: 10 },
+    thresholdLabel: 'Healthy: none · Watch: occasional (≤ 2, or ≤ 10 per 1k) · Action: 3+ and above 10 per 1k',
     basis:
-      'Rated per 1,000 conversations so a busy agent is not penalised for volume. A blocked attempt is a successful defence, but repeated probing needs an owner’s attention.',
-    minSample: 20,
+      'A blocked attempt is a successful defence, so one-off attempts are only a Watch. Action requires repeated probing: at least 3 attempts AND more than 10 per 1,000 conversations, so neither a single attempt on a quiet agent nor normal background noise on a busy one triggers it.',
+    minSample: 1,
     sampleLabel: 'engaged conversations',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'indirect_attacks',
@@ -205,15 +193,14 @@ const METRICS = [
     plain: 'Malicious instructions found inside knowledge sources',
     unit: 'count',
     definition:
-      'Responses blocked because a document or web page the agent read contained an indirect prompt attack (error sub-code OpenAIndirectAttack). Points to a knowledge source that needs review.',
+      'Responses blocked because a document or web page the agent read contained an indirect prompt attack (error sub-code OpenAIndirectAttack).',
     formula: 'count of OnErrorLog with OpenAIndirectAttack',
     source: 'Application Insights · AppEvents (OnErrorLog: ContentFiltered / OpenAIndirectAttack)',
     thresholds: { higherIsBetter: false, green: 0, amber: 2 },
-    basis: 'Any occurrence means grounded content is unsafe or a false positive that blocks users; both need the owner to review the source.',
+    basis: 'Any occurrence means grounded content is unsafe, or a false positive is blocking users; both need the owner to review the source.',
     minSample: 1,
     sampleLabel: 'engaged conversations',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'content_safety_blocks',
@@ -231,7 +218,6 @@ const METRICS = [
     minSample: 5,
     sampleLabel: 'engaged conversations',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'dlp_violations',
@@ -248,7 +234,6 @@ const METRICS = [
     minSample: 1,
     sampleLabel: 'engaged conversations',
     availability: 'live',
-    appliesTo: ['all'],
   },
   {
     id: 'sensitive_data_exposure',
@@ -262,7 +247,6 @@ const METRICS = [
     source: 'Microsoft Purview DSPM for AI (not yet connected)',
     thresholds: { higherIsBetter: false, green: 0, amber: 2 },
     availability: 'not-available',
-    appliesTo: ['all'],
   },
   {
     id: 'unapproved_tool_calls',
@@ -271,12 +255,11 @@ const METRICS = [
     name: 'Unapproved tool calls',
     plain: 'Calls to systems not on the agent’s allowed list',
     unit: 'count',
-    definition: 'Calls to connectors or APIs that are not on the agent’s allowed list in the AI inventory (e.g. an HR agent calling Salesforce).',
-    formula: 'tool calls where target ∉ inventory.allowedConnectors',
-    source: 'Tool-call telemetry (OpenTelemetry tracing) + AI inventory allowedConnectors',
+    definition: 'Calls to connectors or APIs that are not on the agent’s allowed list (e.g. an HR agent calling Salesforce).',
+    formula: 'tool calls where target ∉ allowedConnectors',
+    source: 'Tool-call telemetry (OpenTelemetry tracing) + allowed connectors on the agent profile',
     thresholds: { higherIsBetter: false, green: 0, amber: 0 },
     availability: 'not-available',
-    appliesTo: ['use-case'],
   },
 
   // ------------------------------------------------------------------ COST
@@ -289,11 +272,10 @@ const METRICS = [
     unit: 'credits',
     definition:
       'Estimated Copilot Credits: answered user messages × credits per response for the agent’s design (Microsoft rate card: classic answer 1, generative answer 2, agent action 5, tenant graph grounding 10).',
-    formula: 'answered messages × inventory.creditsPerResponse (default 2)',
-    source: 'Application Insights turns × Copilot Studio billing rate card. Authoritative figure: Power Platform admin center → Copilot Credit consumption.',
+    formula: 'answered messages × creditsPerResponse (default 2)',
+    source: 'Application Insights turns × Copilot Studio billing rate card. Billed figure: Power Platform admin center → Copilot Credit consumption.',
     thresholds: null,
     availability: 'live',
-    appliesTo: ['copilot-studio'],
   },
   {
     id: 'token_consumption',
@@ -307,7 +289,6 @@ const METRICS = [
     source: 'Application Insights · AppDependencies (OpenTelemetry gen_ai.* attributes; Foundry / SDK agents)',
     thresholds: null,
     availability: 'conditional',
-    appliesTo: ['foundry'],
   },
   {
     id: 'spend',
@@ -318,11 +299,10 @@ const METRICS = [
     unit: '%',
     definition: 'Estimated spend in the period as a share of the agent’s monthly budget, pro-rated to the reporting period.',
     formula: 'estimated spend ÷ (monthly budget × days ÷ 30) × 100',
-    source: 'Estimated spend ÷ inventory.monthlyBudgetUsd',
+    source: 'Estimated spend ÷ monthly budget on the agent profile',
     thresholds: { higherIsBetter: false, green: 80, amber: 100 },
     basis: 'Above 80% of the pro-rated budget gives early warning; above 100% the agent is over budget.',
     availability: 'conditional',
-    appliesTo: ['all'],
   },
   {
     id: 'cost_per_conversation',
@@ -336,17 +316,15 @@ const METRICS = [
     source: 'Derived',
     thresholds: null,
     availability: 'conditional',
-    appliesTo: ['all'],
   },
 ];
 
-// Compliance checks are automatic: they compare telemetry with the AI inventory.
+// AI policy checks are automatic: they compare telemetry with the agent profile.
 const COMPLIANCE_CHECKS = [
-  { id: 'registered', name: 'Registered in AI inventory', definition: 'Agent seen in telemetry has a matching AI inventory record.' },
-  { id: 'owners', name: 'Business and technical owner assigned', definition: 'Both owner fields are populated (placeholders do not count).' },
-  { id: 'risk_tier', name: 'Risk tier assigned', definition: 'Inventory record carries a risk tier (Low / Medium / High).' },
-  { id: 'approved', name: 'Approved before production use', definition: 'Production traffic only from agents whose inventory status is "Approved".' },
-  { id: 'telemetry', name: 'Sending telemetry', definition: 'Agent sent runtime telemetry within the reporting period.' },
+  { id: 'profile', name: 'Purpose and department recorded', definition: 'The agent profile states what the agent is for and which department owns it.' },
+  { id: 'owners', name: 'Business and technical owner assigned', definition: 'Both owner fields are populated (template placeholders do not count).' },
+  { id: 'risk_tier', name: 'Risk tier assigned', definition: 'The profile carries a risk tier (Low / Medium / High).' },
+  { id: 'approved', name: 'Approved before production use', definition: 'Production traffic only from agents whose approval status is "Approved".' },
 ];
 
 const SEVERITY = { unknown: 0, green: 1, amber: 2, red: 3 };
@@ -365,6 +343,7 @@ function rate(metric, value) {
 const UNIT_SUFFIX = { '%': '%', s: 's', per1k: ' per 1k' };
 
 function thresholdText(metric) {
+  if (metric.thresholdLabel) return metric.thresholdLabel;
   const t = metric.thresholds;
   if (!t) return 'For information (no rating)';
   const u = UNIT_SUFFIX[metric.unit] || '';
@@ -439,20 +418,10 @@ function publicLibrary() {
       unit: m.unit,
       basis: m.basis || null,
       availability: m.availability,
-      appliesTo: m.appliesTo,
       minSample: m.minSample || null,
     })),
     compliance: COMPLIANCE_CHECKS,
   };
 }
 
-module.exports = {
-  METRICS,
-  PILLARS,
-  HEALTH_COMPONENTS,
-  COMPLIANCE_CHECKS,
-  evaluate,
-  worstStatus,
-  formatValue,
-  publicLibrary,
-};
+module.exports = { METRICS, PILLARS, HEALTH_COMPONENTS, COMPLIANCE_CHECKS, evaluate, worstStatus, formatValue, publicLibrary, rate };

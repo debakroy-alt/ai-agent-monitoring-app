@@ -2,24 +2,24 @@
  * GET /api/agents?days=7[&fresh=1]
  *
  * Reads Copilot Studio (and Foundry / OpenTelemetry) runtime telemetry from
- * Log Analytics (workspace-based Application Insights), merges it with the AI
- * inventory, applies the metrics library, and returns one payload for the
- * whole dashboard.
+ * Log Analytics (workspace-based Application Insights) and returns:
+ *   agents     – CONNECTED agents only (from the registry), measured against the metrics library
+ *   discovered – agents that sent telemetry in the period but are not connected
  *
- * No value that drives a red / amber / green status is entered manually.
+ * Everything returned is live. No demo or template data is ever mixed in.
  *
  * Identity stability:
- *   - Every conversation is mapped to ONE agent deterministically (sorted sets,
- *     no take_any), and bot display names are mapped to their schema name.
- *   - Every known name (schema, display name, aliases) is mapped to the
- *     inventory key inside KQL, so all queries agree on the same agent IDs.
- *   - All queries share one fixed [start, end] window instead of ago().
- *   - Results are sorted deterministically (status, volume, name).
+ *   - Each conversation is mapped to ONE agent deterministically (sorted sets, no take_any).
+ *   - Every name of a connected agent (id, display name, aliases) is mapped to its id inside KQL,
+ *     so all queries agree on the same agent.
+ *   - All queries share one fixed [start, end] window.
+ *   - Results are sorted deterministically.
  */
 const { DefaultAzureCredential } = require('@azure/identity');
 const { publicLibrary } = require('../shared/metrics-registry');
-const { loadInventory, matchInventory, buildAliasMap } = require('../shared/inventory');
-const { buildAgent, fillSeries, sortAgents, DEFAULT_CONFIG } = require('../shared/build-agent');
+const { loadInventory, matchInventory, buildAliasMap, mergeProfile } = require('../shared/inventory');
+const { loadRegistry } = require('../shared/registry');
+const { buildAgent, buildDiscovered, fillSeries, sortAgents, DEFAULT_CONFIG } = require('../shared/build-agent');
 
 const ALLOWED_DAYS = [1, 7, 30, 90];
 const CACHE_MS = Number(process.env.CACHE_SECONDS || 60) * 1000;
@@ -29,9 +29,8 @@ function readConfig() {
   try {
     Object.assign(modelPrices, JSON.parse(process.env.MODEL_PRICES_JSON || '{}'));
   } catch {
-    /* ignore malformed JSON; defaults apply */
+    /* malformed JSON: defaults apply */
   }
-  // Backwards compatible single price list (USD per 1K tokens) applies to any model without a specific price.
   if (process.env.PRICE_INPUT_PER_1K_USD && process.env.PRICE_OUTPUT_PER_1K_USD) {
     modelPrices[''] = { in: Number(process.env.PRICE_INPUT_PER_1K_USD) * 1000, out: Number(process.env.PRICE_OUTPUT_PER_1K_USD) * 1000 };
   }
@@ -44,7 +43,7 @@ function readConfig() {
 }
 
 const credential = new DefaultAzureCredential();
-const cache = new Map(); // days -> { at, body }
+const cache = new Map(); // `${days}|${registryEtag}` -> { at, body }
 
 // ------------------------------------------------------------------ KQL
 const kqlString = (s) => `'${String(s).replace(/[\r\n\t]/g, ' ').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
@@ -73,9 +72,13 @@ const dyn = (list) => `dynamic([${list.map((c) => `"${c}"`).join(', ')}])`;
 /**
  * Shared prelude. Resolves every conversation to exactly one agent:
  *   1. topic schema prefix (stable, survives renames), else
- *   2. the bot name on its messages, mapped to the schema seen with that name elsewhere, else
+ *   2. the bot name, mapped to the schema seen with that name elsewhere, else
  *   3. the bot name itself;
- * then maps that name (or the bot name) to the inventory key.
+ * then maps that name (or the bot name) to a connected agent's id.
+ *
+ * Only "message" activities count as user messages / replies. Channel events
+ * (conversationUpdate, startConversation, typing…) are ignored, otherwise they
+ * show up as unanswered user messages and drag availability down.
  */
 const prelude = (w) => String.raw`
 let StartTime = datetime(${w.start});
@@ -90,8 +93,12 @@ let Base = AppEvents
         TopicId        = tostring(Properties["TopicId"]),
         TopicName      = tostring(Properties["TopicName"]),
         DesignMode     = tostring(Properties["DesignMode"]),
-        ChannelId      = tostring(Properties["channelId"])
-    | where isnotempty(ConversationId);
+        ChannelId      = tostring(Properties["channelId"]),
+        ActivityType   = tolower(coalesce(tostring(Properties["activityType"]), tostring(Properties["type"])))
+    | where isnotempty(ConversationId)
+    | extend IsMessage = isempty(ActivityType) or ActivityType == "message"
+    | extend IsUserMsg = Name == "BotMessageReceived" and IsMessage,
+             IsBotMsg  = Name == "BotMessageSend" and IsMessage;
 let ConvKeys = Base
     | extend Schema = extract(@"^(.+?)\.topic\.", 1, TopicId),
              BotName = case(Name == "BotMessageReceived", RecipientName, Name == "BotMessageSend", FromName, "")
@@ -127,8 +134,8 @@ let Conv = Events
     | extend IsHarm = IsHarmCode or (IsFiltered and not(IsJail) and not(IsIndirect))
     | extend IsSafety = IsJail or IsIndirect or IsHarm or IsDlp
     | summarize
-        UserMsgs = countif(Name == "BotMessageReceived"),
-        BotMsgs = countif(Name == "BotMessageSend"),
+        UserMsgs = countif(IsUserMsg),
+        BotMsgs = countif(IsBotMsg),
         HealthErrors = countif(Name == "OnErrorLog" and not(IsSafety)),
         DepErrors = countif(Name == "OnErrorLog" and IsDep),
         Jail = countif(IsJail), Indirect = countif(IsIndirect), Harm = countif(IsHarm), Dlp = countif(IsDlp),
@@ -173,7 +180,7 @@ Conv
 | order by AgentId asc, Bucket asc`,
   turns: (w) => prelude(w) + String.raw`
 Events
-| where Name in ("BotMessageReceived", "BotMessageSend")
+| where IsUserMsg or IsBotMsg
 | project AgentId, ConversationId, Name, TimeGenerated
 | sort by ConversationId asc, TimeGenerated asc, Name asc
 | extend NextName = next(Name), NextConv = next(ConversationId), NextTime = next(TimeGenerated)
@@ -214,10 +221,8 @@ union isfuzzy=true
 };
 
 /**
- * The Log Analytics REST API returns `dynamic` columns (arrays such as Channels,
- * BotNames, RawKeys) as JSON text, not as arrays. Convert them back so the rest
- * of the code can treat them as arrays. (Missing this caused the
- * "Live telemetry could not be retrieved" error: `.filter is not a function`.)
+ * The Log Analytics REST API returns `dynamic` columns (Channels, BotNames, RawKeys)
+ * as JSON text. Convert them back to arrays.
  */
 function parseCell(value, type) {
   if (type !== 'dynamic' || typeof value !== 'string') return value;
@@ -226,6 +231,12 @@ function parseCell(value, type) {
   } catch {
     return value;
   }
+}
+
+function stageError(stage, message) {
+  const e = new Error(`${stage}: ${message}`);
+  e.stage = stage;
+  return e;
 }
 
 async function runQuery(workspaceId, token, query, name) {
@@ -250,26 +261,23 @@ async function runQuery(workspaceId, token, query, name) {
   return table.rows.map((row) => Object.fromEntries(table.columns.map((c, i) => [c.name, parseCell(row[i], c.type)])));
 }
 
-function stageError(stage, message) {
-  const e = new Error(`${stage}: ${message}`);
-  e.stage = stage;
-  return e;
-}
-
 const groupBy = (rows) => rows.reduce((acc, r) => ((acc[r.AgentId] ||= []).push(r), acc), {});
 const byAgent = (rows) => Object.fromEntries(rows.map((r) => [r.AgentId, r]));
 const asArray = (v) => (Array.isArray(v) ? v : v === null || v === undefined || v === '' ? [] : [v]);
+const lower = (s) => String(s || '').toLowerCase();
 
-async function buildPayload(days) {
+async function buildPayload(days, registry) {
   const started = Date.now();
   const workspaceId = process.env.LOG_ANALYTICS_WORKSPACE_ID;
   if (!workspaceId) throw stageError('configuration', 'LOG_ANALYTICS_WORKSPACE_ID is not set');
   const config = readConfig();
 
   const inventory = await loadInventory(credential).catch((e) => ({ source: 'error', sourceLabel: e.message, records: [] }));
-  const { map: aliasMap, clashes } = buildAliasMap(inventory.records);
+  const profiles = registry.agents.map((r) => mergeProfile(r, matchInventory(inventory.records, r.id)));
+  const connectedKeys = new Set(profiles.map((p) => lower(p.key)));
+  // Connected agents first so their names always win; inventory records only help group discovered agents.
+  const { map: aliasMap, clashes } = buildAliasMap([...profiles, ...inventory.records.filter((r) => !connectedKeys.has(lower(r.key)))]);
 
-  // One fixed window for every query (minute precision), so all figures describe the same period.
   const endMs = Math.floor(Date.now() / 60000) * 60000;
   const w = {
     days,
@@ -294,35 +302,40 @@ async function buildPayload(days) {
     const seriesBy = groupBy(series);
     const errorsBy = groupBy(errors.rows);
     const costBy = groupBy(costResult.rows);
-    const now = endMs;
-
-    const keys = new Set([...summary.map((r) => r.AgentId), ...Object.keys(costBy)].filter(Boolean));
     const summaryBy = byAgent(summary);
-    const agents = [...keys].map((key) => {
+    const rowFor = (key) => {
       const row = { ...(summaryBy[key] || { AgentId: key }) };
       for (const col of ['Channels', 'BotNames', 'RawKeys']) row[col] = asArray(row[col]);
       row.TopErrorCodes = (errorsBy[key] || [])
         .sort((a, b) => b.Count - a.Count || String(a.ErrorCode).localeCompare(String(b.ErrorCode)))
         .slice(0, 6)
         .map((e) => ({ code: e.ErrorCode, count: Number(e.Count) }));
+      return row;
+    };
+
+    // Connected agents — always all of them, even with no activity in the period.
+    const telemetryKeys = new Set([...summary.map((r) => r.AgentId), ...Object.keys(costBy)].filter(Boolean));
+    const keyFor = (profile) => [...telemetryKeys].find((k) => lower(k) === lower(profile.key)) || profile.key;
+    const agents = profiles.map((profile) => {
+      const key = keyFor(profile);
       return buildAgent({
-        key,
-        row,
+        key: profile.key,
+        row: rowFor(key),
         turns: turnsBy[key],
         series: fillSeries(seriesBy[key] || [], w.start, w.end, days),
         costRows: costBy[key] || [],
-        inv: matchInventory(inventory.records, key),
+        profile,
         days,
-        now,
+        now: endMs,
         config,
       });
     });
 
-    // Registered agents with no telemetry in the period are still shown (grey) so gaps are visible.
-    const seen = new Set(agents.map((a) => a.id.toLowerCase()));
-    const silent = inventory.records
-      .filter((r) => !seen.has(String(r.key).toLowerCase()))
-      .map((inv) => buildAgent({ key: inv.key, row: {}, series: fillSeries([], w.start, w.end, days), inv, days, now, config }));
+    // Discovered — sending telemetry but not connected.
+    const discovered = [...telemetryKeys]
+      .filter((k) => !connectedKeys.has(lower(k)))
+      .map((key) => buildDiscovered({ key, row: rowFor(key), suggestion: matchInventory(inventory.records, key) || null }))
+      .sort((a, b) => b.conversations - a.conversations || a.name.localeCompare(b.name));
 
     return {
       mode: 'live',
@@ -332,17 +345,21 @@ async function buildPayload(days) {
       queryMs: Date.now() - started,
       sources: {
         telemetry: 'Application Insights (Log Analytics workspace)',
+        registry: registry.storage,
+        registryUpdatedAt: registry.updatedAt,
+        connectedCount: registry.agents.length,
         inventory: inventory.source,
         inventoryLabel: inventory.sourceLabel,
-        inventoryRecords: inventory.records.length,
         aliasClashes: clashes,
         costTelemetry: costResult.ok ? (costResult.rows.length ? 'connected' : 'no gen_ai token data') : 'unavailable',
-        pricing: `Copilot Credits at $${config.creditPriceUsd}/credit · ${Object.keys(config.modelPrices).length ? 'custom' : 'default'} model price list`,
+        pricing: `Copilot Credits at $${config.creditPriceUsd}/credit · ${process.env.MODEL_PRICES_JSON ? 'custom' : 'default'} model price list`,
         slowReplySeconds: config.slowReplySeconds,
         creditsPerResponse: config.defaultCreditsPerResponse,
       },
+      changesRequireSignIn: process.env.ALLOW_ANONYMOUS_CHANGES !== 'true',
       library: publicLibrary(),
-      agents: sortAgents([...agents, ...silent]),
+      agents: sortAgents(agents),
+      discovered,
     };
   } catch (e) {
     throw e.stage ? e : stageError('processing the results', e.message);
@@ -355,23 +372,25 @@ module.exports = async function (context, req) {
   const days = ALLOWED_DAYS.includes(requested) ? requested : 7;
   const fresh = req?.query?.fresh === '1';
   try {
-    const hit = cache.get(days);
+    let registry;
+    try {
+      registry = await loadRegistry(credential);
+    } catch (e) {
+      throw stageError('loading connected agents', e.message);
+    }
+    const cacheKey = `${days}|${registry.etag || 'empty'}`;
+    const hit = cache.get(cacheKey);
     let body;
     if (!fresh && hit && Date.now() - hit.at < CACHE_MS) {
       body = { ...hit.body, cached: true };
     } else {
-      body = await buildPayload(days);
-      cache.set(days, { at: Date.now(), body });
+      body = await buildPayload(days, registry);
+      for (const k of cache.keys()) if (k.startsWith(`${days}|`)) cache.delete(k);
+      cache.set(cacheKey, { at: Date.now(), body });
     }
-    context.res = {
-      status: 200,
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-      body,
-    };
+    context.res = { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }, body };
   } catch (error) {
     context.log.error('Live telemetry query failed.', error);
-    // Name the failing step (safe to show) so problems can be diagnosed from the banner.
-    // Full error text only when SHOW_ERROR_DETAILS=true or in development.
     const showDetail = process.env.SHOW_ERROR_DETAILS === 'true' || process.env.NODE_ENV === 'development';
     context.res = {
       status: 500,
@@ -385,7 +404,6 @@ module.exports = async function (context, req) {
   }
 };
 
-// Exposed for tests.
 module.exports.QUERIES = QUERIES;
 module.exports.aliasTable = aliasTable;
 module.exports.kqlString = kqlString;
