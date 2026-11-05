@@ -1,16 +1,10 @@
 /**
- * Optional AI system inventory (system of record) used to pre-fill agent
- * profiles when connecting an agent, and to fill gaps in a connected agent's
- * profile. It never decides WHICH agents are shown — the connected-agents
- * registry does (see registry.js).
+ * Optional AI system inventory (system of record) used to fill gaps in an
+ * agent's profile. It never decides WHICH agents are shown — telemetry does.
  *
  *   INVENTORY_URL   – JSON endpoint (SharePoint list via Graph, Dataverse, OneTrust, ServiceNow…)
  *                     returning an array or { value: [...] }.
  *   INVENTORY_SCOPE – optional token scope for the API identity.
- *
- * There is deliberately no bundled stand-in file: in live mode everything shown
- * is live (the old agent-inventory.json template records were being displayed
- * as if they were real agents).
  */
 const { isPlaceholder } = require('./registry');
 
@@ -36,7 +30,7 @@ const FIELD_MAP = {
 const clean = (v) => (v === undefined || v === null || v === '' || isPlaceholder(v) ? undefined : v);
 
 function pick(record, aliases) {
-  const src = record.fields || record; // Graph list items keep data under .fields
+  const src = record.fields || record;
   for (const key of aliases) {
     const v = clean(src[key]);
     if (v !== undefined) return v;
@@ -44,7 +38,6 @@ function pick(record, aliases) {
   return undefined;
 }
 
-/** Normalises any inventory or registry record to the canonical profile shape. */
 function normalise(record) {
   const out = {};
   for (const [field, aliases] of Object.entries(FIELD_MAP)) out[field] = pick(record, aliases);
@@ -92,25 +85,20 @@ function buildAliasMap(records) {
   return { map, clashes };
 }
 
-/** Case-insensitive match on key, id, display name or any alias. */
 function matchInventory(records, agentKey) {
   const key = String(agentKey || '').toLowerCase();
-  return records.find((r) =>
-    [r.key, r.id, r.displayName, ...(r.aliases || [])].filter(Boolean).some((v) => String(v).toLowerCase() === key)
-  );
+  return records.find((r) => [r.key, r.id, r.displayName, ...(r.aliases || [])].filter(Boolean).some((v) => String(v).toLowerCase() === key));
 }
 
-/** Registry values win; inventory only fills gaps. */
-function mergeProfile(registryRecord, inventoryRecord) {
-  const reg = normalise(registryRecord);
-  if (!inventoryRecord) return { ...reg, notes: registryRecord.notes };
+/** Saved profile wins; inventory only fills gaps. */
+function mergeProfile(saved, inventoryRecord) {
+  const reg = saved ? normalise(saved) : null;
+  if (!reg) return inventoryRecord || null;
+  if (!inventoryRecord) return reg;
   const out = { ...inventoryRecord };
-  for (const [k, v] of Object.entries(reg)) {
-    if (Array.isArray(v) ? v.length : v !== undefined) out[k] = v;
-  }
+  for (const [k, v] of Object.entries(reg)) if (Array.isArray(v) ? v.length : v !== undefined) out[k] = v;
   out.aliases = [...new Set([...(reg.aliases || []), ...(inventoryRecord.aliases || [])])];
   out.key = reg.key;
-  out.notes = registryRecord.notes;
   return out;
 }
 

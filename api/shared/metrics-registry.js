@@ -1,10 +1,9 @@
 /**
  * Metrics library — single source of truth for every metric on the dashboard.
  *
- * A common library maintained once; every connected agent is measured against
+ * A common library maintained once; every monitored agent is measured against
  * it. Change a threshold here and every agent, card, chart and the in-app guide
- * picks it up. Nothing is entered per agent by hand; values are calculated from
- * telemetry at request time.
+ * picks it up. Values are calculated from telemetry at request time.
  *
  * availability:
  *   'live'          – calculated today from Copilot Studio -> Application Insights
@@ -28,8 +27,7 @@ const PILLARS = {
     name: 'Risk',
     question: 'Is the agent behaving safely?',
     definition:
-      'Safety and security signals raised by the platform guardrails (jailbreaks, prompt attacks hidden in documents, harmful content, ' +
-      'data-policy blocks).',
+      'Safety and security signals raised by the platform guardrails (jailbreaks, prompt attacks hidden in documents, harmful content, data-policy blocks).',
   },
   cost: {
     name: 'Cost',
@@ -57,7 +55,7 @@ const METRICS = [
     name: 'Agent availability',
     plain: 'How often users got a reply',
     unit: '%',
-    definition: 'Share of user messages that received a reply from the agent.',
+    definition: 'Share of user chat messages that received a reply from the agent. Automatic (trigger-started) runs are not included because they do not reply in chat.',
     formula: 'answered user messages ÷ user messages × 100',
     source: 'Application Insights · AppEvents (BotMessageReceived → BotMessageSend, message activities only)',
     thresholds: { higherIsBetter: true, green: 99, amber: 95 },
@@ -70,18 +68,17 @@ const METRICS = [
     id: 'task_completion',
     pillar: 'health',
     component: 'completion',
-    name: 'Conversations resolved',
-    plain: 'Conversations finished without an error or hand-off',
+    name: 'Runs resolved',
+    plain: 'Conversations and automatic runs finished without an error or hand-off',
     unit: '%',
     definition:
-      'Engaged conversations where the agent replied, no runtime error occurred and the conversation was not escalated or sent to the fallback topic.',
-    formula: 'engaged conversations answered with no error, escalation or fallback ÷ engaged conversations × 100',
-    source: 'Application Insights · AppEvents (BotMessageSend, OnErrorLog, Escalate / Fallback topics)',
+      'Conversations (or trigger-started runs) that finished without a runtime error, escalation or fallback. A chat conversation must also have received a reply.',
+    formula: 'runs with no error, escalation, fallback (and a reply, for chats) ÷ runs × 100',
+    source: 'Application Insights · AppEvents (BotMessageReceived/Send, OnErrorLog, Escalate / Fallback topics)',
     thresholds: { higherIsBetter: true, green: 85, amber: 70 },
-    basis:
-      'Users can leave mid-topic and some questions legitimately need a human, so 100% is not realistic. 85% / 70% are starting bands to be tuned per use case.',
+    basis: 'Users can leave mid-topic and some questions legitimately need a human, so 100% is not realistic. 85% / 70% are starting bands to be tuned per use case.',
     minSample: 5,
-    sampleLabel: 'engaged conversations',
+    sampleLabel: 'runs',
     availability: 'live',
   },
   {
@@ -120,17 +117,17 @@ const METRICS = [
     id: 'failed_execution_rate',
     pillar: 'health',
     component: 'errors',
-    name: 'Conversations with errors',
-    plain: 'Conversations where something broke',
+    name: 'Runs with errors',
+    plain: 'Conversations or runs where something broke',
     unit: '%',
     definition:
-      'Share of engaged conversations that recorded at least one runtime error. Guardrail blocks (jailbreak, harmful content, data policy) are excluded here and reported under Risk.',
-    formula: 'engaged conversations with a non-safety OnErrorLog ÷ engaged conversations × 100',
+      'Share of runs that recorded at least one runtime error. Guardrail blocks (jailbreak, harmful content, data policy) are excluded here and reported under Risk.',
+    formula: 'runs with a non-safety OnErrorLog ÷ runs × 100',
     source: 'Application Insights · AppEvents (OnErrorLog)',
     thresholds: { higherIsBetter: false, green: 2, amber: 5 },
-    basis: 'Mirrors a 98% success objective; above 5% means 1 in 20 conversations is visibly broken.',
+    basis: 'Mirrors a 98% success objective; above 5% means 1 in 20 runs is visibly broken.',
     minSample: 5,
-    sampleLabel: 'engaged conversations',
+    sampleLabel: 'runs',
     availability: 'live',
   },
   {
@@ -138,16 +135,16 @@ const METRICS = [
     pillar: 'health',
     component: 'dependency',
     name: 'Tool & connector failures',
-    plain: 'Conversations where a flow, connector or tool failed',
+    plain: 'Runs where a flow, connector or tool failed',
     unit: '%',
     definition:
-      'Share of engaged conversations where an agent flow, connector, AI tool, knowledge search or connected agent failed (e.g. FlowActionTimedOut after the 100-second agent-flow limit, ConnectorRequestFailure).',
-    formula: 'engaged conversations with a tool/connector error code ÷ engaged conversations × 100',
+      'Share of runs where an agent flow, connector, AI tool, knowledge search or connected agent failed (e.g. FlowActionTimedOut after the 100-second agent-flow limit, ConnectorRequestFailure).',
+    formula: 'runs with a tool/connector error code ÷ runs × 100',
     source: 'Application Insights · AppEvents (OnErrorLog error codes) · Foundry: AppDependencies success flag',
     thresholds: { higherIsBetter: false, green: 1, amber: 3 },
     basis: 'Tool failures are a subset of all errors, so the bands are tighter than the overall error rate.',
     minSample: 5,
-    sampleLabel: 'engaged conversations',
+    sampleLabel: 'runs',
     availability: 'live',
   },
   {
@@ -175,14 +172,14 @@ const METRICS = [
     unit: 'per1k',
     definition:
       'Messages blocked by the platform guardrails because the user tried to override the agent’s instructions (jailbreak / direct prompt injection, error sub-code OpenAIJailBreak).',
-    formula: 'blocked jailbreak attempts ÷ engaged conversations × 1,000',
+    formula: 'blocked jailbreak attempts; rate = attempts ÷ runs × 1,000',
     source: 'Application Insights · AppEvents (OnErrorLog: ContentFiltered / OpenAIJailBreak)',
     thresholds: { higherIsBetter: false, green: 0, amber: 10 },
-    thresholdLabel: 'Healthy: none · Watch: occasional (≤ 2, or ≤ 10 per 1k) · Action: 3+ and above 10 per 1k',
+    thresholdLabel: 'Healthy: none · Watch: occasional · Action: 3+ attempts and above 10 per 1k',
     basis:
-      'A blocked attempt is a successful defence, so one-off attempts are only a Watch. Action requires repeated probing: at least 3 attempts AND more than 10 per 1,000 conversations, so neither a single attempt on a quiet agent nor normal background noise on a busy one triggers it.',
+      'A blocked attempt is a successful defence, so one-off attempts are only a Watch. Action requires repeated probing: at least 3 attempts AND more than 10 per 1,000 runs.',
     minSample: 1,
-    sampleLabel: 'engaged conversations',
+    sampleLabel: 'runs',
     availability: 'live',
   },
   {
@@ -192,14 +189,13 @@ const METRICS = [
     name: 'Attacks hidden in documents',
     plain: 'Malicious instructions found inside knowledge sources',
     unit: 'count',
-    definition:
-      'Responses blocked because a document or web page the agent read contained an indirect prompt attack (error sub-code OpenAIndirectAttack).',
+    definition: 'Responses blocked because a document or web page the agent read contained an indirect prompt attack (error sub-code OpenAIndirectAttack).',
     formula: 'count of OnErrorLog with OpenAIndirectAttack',
     source: 'Application Insights · AppEvents (OnErrorLog: ContentFiltered / OpenAIndirectAttack)',
     thresholds: { higherIsBetter: false, green: 0, amber: 2 },
     basis: 'Any occurrence means grounded content is unsafe, or a false positive is blocking users; both need the owner to review the source.',
     minSample: 1,
-    sampleLabel: 'engaged conversations',
+    sampleLabel: 'runs',
     availability: 'live',
   },
   {
@@ -207,16 +203,16 @@ const METRICS = [
     pillar: 'risk',
     component: 'security',
     name: 'Harmful content blocked',
-    plain: 'Conversations where hate, violence, sexual or self-harm content was filtered',
+    plain: 'Runs where hate, violence, sexual or self-harm content was filtered',
     unit: '%',
     definition:
-      'Share of engaged conversations where the Responsible AI filter blocked harmful content (OpenAIHate, OpenAIViolence, OpenAISexual, OpenAISelfHarm or an unclassified ContentFiltered).',
-    formula: 'conversations with a harmful-content block ÷ engaged conversations × 100',
+      'Share of runs where the Responsible AI filter blocked harmful content (OpenAIHate, OpenAIViolence, OpenAISexual, OpenAISelfHarm or an unclassified ContentFiltered).',
+    formula: 'runs with a harmful-content block ÷ runs × 100',
     source: 'Application Insights · AppEvents (OnErrorLog: ContentFiltered sub-codes)',
     thresholds: { higherIsBetter: false, green: 1, amber: 3 },
     basis: 'Occasional false positives are normal; a sustained rate above 1–3% suggests misuse or an over-sensitive topic.',
     minSample: 5,
-    sampleLabel: 'engaged conversations',
+    sampleLabel: 'runs',
     availability: 'live',
   },
   {
@@ -232,7 +228,7 @@ const METRICS = [
     thresholds: { higherIsBetter: false, green: 0, amber: 2 },
     basis: 'The policy worked, but the agent design is attempting something the organisation does not allow.',
     minSample: 1,
-    sampleLabel: 'engaged conversations',
+    sampleLabel: 'runs',
     availability: 'live',
   },
   {
@@ -271,9 +267,9 @@ const METRICS = [
     plain: 'Estimated Copilot Studio billing units consumed',
     unit: 'credits',
     definition:
-      'Estimated Copilot Credits: answered user messages × credits per response for the agent’s design (Microsoft rate card: classic answer 1, generative answer 2, agent action 5, tenant graph grounding 10).',
-    formula: 'answered messages × creditsPerResponse (default 2)',
-    source: 'Application Insights turns × Copilot Studio billing rate card. Billed figure: Power Platform admin center → Copilot Credit consumption.',
+      'Estimated Copilot Credits: agent responses (chat replies + automatic runs) × credits per response for the agent’s design (Microsoft rate card: classic answer 1, generative answer 2, agent action 5, tenant graph grounding 10).',
+    formula: '(answered messages + automatic runs) × creditsPerResponse (default 2)',
+    source: 'Application Insights × Copilot Studio billing rate card. Billed figure: Power Platform admin center → Copilot Credit consumption.',
     thresholds: null,
     availability: 'live',
   },
@@ -308,11 +304,11 @@ const METRICS = [
     id: 'cost_per_conversation',
     pillar: 'cost',
     component: 'unit',
-    name: 'Cost per conversation',
-    plain: 'Average estimated cost of one conversation',
+    name: 'Cost per run',
+    plain: 'Average estimated cost of one conversation or run',
     unit: 'usd',
-    definition: 'Estimated spend divided by engaged conversations. Useful for comparing agents and building business cases.',
-    formula: 'estimated spend ÷ engaged conversations',
+    definition: 'Estimated spend divided by runs. Useful for comparing agents and building business cases.',
+    formula: 'estimated spend ÷ runs',
     source: 'Derived',
     thresholds: null,
     availability: 'conditional',
@@ -399,7 +395,6 @@ function evaluate(metricId, { value = null, sample = null, display = null, note 
   };
 }
 
-/** Public, UI-friendly version of the library (served with every payload). */
 function publicLibrary() {
   return {
     pillars: PILLARS,

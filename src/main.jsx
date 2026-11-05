@@ -11,19 +11,19 @@ import {
   ChevronRight,
   Clock,
   DollarSign,
+  EyeOff,
   HelpCircle,
+  History,
   Info,
-  LogIn,
   Moon,
   Pencil,
-  Plug,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldCheck,
   SlidersHorizontal,
   Sun,
-  Trash2,
   X,
   XCircle,
 } from 'lucide-react';
@@ -36,7 +36,7 @@ const STATUS_MEANING = {
   green: 'All measured checks are within limits.',
   amber: 'At least one check is close to its limit — owner should review.',
   red: 'At least one check has breached its limit — owner should act now.',
-  unknown: 'Not enough data to judge. A visibility gap, not a pass.',
+  unknown: 'Not enough activity to judge. A visibility gap, not a pass.',
 };
 const STATUS_ORDER = ['red', 'amber', 'green', 'unknown'];
 const PILLARS = ['health', 'risk', 'cost'];
@@ -63,13 +63,13 @@ const ENVIRONMENTS = ['Production', 'Test only', 'No activity'];
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
 export const KPI_DEFS = {
-  connected: 'Agents in the connected-agents list (Manage agents). Only these are monitored and counted.',
-  active: 'Connected agents that had at least one conversation in the reporting period.',
-  conversations: 'Conversations where a user sent at least one message (greeting-only sessions are excluded).',
-  attention: 'Connected agents whose overall status is Watch or Action required.',
-  compliance: 'Connected agents failing one or more automatic AI-policy checks (purpose & department, owners, risk tier, approval).',
-  coverage: 'Share of metrics that could be measured with enough data. Grey (No data) is a visibility gap, never a pass.',
-  discovered: 'Agents sending telemetry in this period that are not connected. They are not counted until connected.',
+  monitored: 'Every agent that sent telemetry to Application Insights in the last 90 days (plus any added by hand), minus agents you removed.',
+  active: 'Agents with at least one conversation or automatic run in the selected period.',
+  runs: 'Chat conversations where a user sent a message, plus automatic (trigger-started) runs. Greeting-only sessions are excluded.',
+  attention: 'Agents whose overall status is Watch or Action required.',
+  compliance: 'Agents failing one or more automatic AI-policy checks (purpose & department, owners, risk tier, approval). Add details under Manage agents to fix.',
+  coverage: 'Share of metrics on active agents that had enough data to rate. Grey (No data) is a visibility gap, never a pass.',
+  widened: 'Agents with no activity in the selected period. Their figures show their most recent 90 days instead, so they always have data.',
 };
 
 const ERROR_HELP = {
@@ -105,7 +105,7 @@ const sum = (items, fn) => items.reduce((s, x) => s + (Number(fn(x)) || 0), 0);
 const pct = (n, d) => (d > 0 ? (100 * n) / d : null);
 
 function relTime(ts, now = Date.now()) {
-  if (!ts) return 'Never';
+  if (!ts) return 'No activity';
   const mins = Math.max(0, Math.round((now - new Date(ts).getTime()) / 60000));
   if (mins < 1) return 'Just now';
   if (mins < 60) return `${mins} min ago`;
@@ -125,7 +125,6 @@ function bucketLabel(t, days) {
   return days === 1 ? d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
-/** Rates a portfolio-level value with the same limits as the agent metric. */
 function rateWith(library, metricId, value) {
   const t = library?.metrics?.find((m) => m.id === metricId)?.thresholds;
   if (!t || value === null || value === undefined) return 'unknown';
@@ -148,8 +147,13 @@ function aggregateSeries(agents) {
   return [...buckets.values()].sort((a, b) => new Date(a.t) - new Date(b.t));
 }
 
+const widenedText = (agent) => `No activity in the ${periodOf(agent.selectedDays).label.toLowerCase()} — showing the last ${agent.dataDays} days`;
+
 function agentHeadline(agent) {
-  if (agent.statuses.overall === 'unknown') return agent.volume ? 'Too little activity in this period to rate.' : 'No activity in this period.';
+  if (agent.statuses.overall === 'unknown') {
+    if (!agent.volume) return 'No activity in the last 90 days.';
+    return `Only ${plural(agent.volume, 'run')} so far — too little activity to rate yet. Figures are shown below.`;
+  }
   const top = agent.alerts[0];
   if (!top) return 'All measured checks are within limits.';
   const more = agent.alerts.length - 1;
@@ -179,6 +183,15 @@ function Tip({ text, label = 'More information' }) {
     <span className="tip" tabIndex={0} role="note" aria-label={`${label}: ${text}`}>
       <Info size={13} aria-hidden="true" />
       <span className="tip-body">{text}</span>
+    </span>
+  );
+}
+
+function WidenedTag({ agent, compact = false }) {
+  if (!agent.widened) return null;
+  return (
+    <span className="widened" title={widenedText(agent)}>
+      <History size={13} aria-hidden="true" /> {compact ? `Last ${agent.dataDays} days` : widenedText(agent)}
     </span>
   );
 }
@@ -256,7 +269,6 @@ function SelectField({ label, tip, value, onChange, options }) {
   );
 }
 
-/** Horizontal bar split by status, with the count AND label written on each segment. */
 function StatusSplit({ counts, total, label, showLabels = false }) {
   if (!total) return <div className="split-empty">No agents</div>;
   return (
@@ -299,7 +311,7 @@ function XAxisLabels({ points, x, days, y0 }) {
 }
 
 function TrendChart({ points, thresholds, unit = '%', days, title, xTitle, yTitle, seriesLabel }) {
-  if (!points.some((p) => p.value !== null)) return <div className="chart-empty">No conversations in this period, so there is no trend to show.</div>;
+  if (!points.some((p) => p.value !== null)) return <div className="chart-empty">No activity in this period, so there is no trend to show.</div>;
   const { W, H, L, T, B } = CHART;
   const R = 110;
   const { green, amber } = thresholds;
@@ -333,15 +345,13 @@ function TrendChart({ points, thresholds, unit = '%', days, title, xTitle, yTitl
         ].map(([cls, name, range, cy]) => (
           <text key={cls} className={`band-label ${cls}`} x={W - R + 10} y={cy - 2}>
             <tspan x={W - R + 10}>{name}</tspan>
-            <tspan x={W - R + 10} dy="14" className="band-range">
-              {range}
-            </tspan>
+            <tspan x={W - R + 10} dy="14" className="band-range">{range}</tspan>
           </text>
         ))}
         <path d={path} className="trend-line" />
         {valid.map((p) => (
           <circle key={p.i} cx={x(p.i)} cy={y(p.value)} r={points.length > 40 ? 2.5 : 4.5} className="trend-dot">
-            <title>{`${bucketLabel(p.t, days)}: ${p.value}${unit} of ${fmtNum(p.n)} conversations`}</title>
+            <title>{`${bucketLabel(p.t, days)}: ${p.value}${unit} of ${fmtNum(p.n)} runs`}</title>
           </circle>
         ))}
         <line className="axis-line" x1={L} x2={W - R} y1={y(0)} y2={y(0)} />
@@ -365,7 +375,7 @@ const VOLUME_KEYS = [
 ];
 
 function VolumeChart({ series, days, title, compact = false }) {
-  if (!series.length || !series.some((s) => s.conversations)) return <div className="chart-empty">No conversations in this period.</div>;
+  if (!series.length || !series.some((s) => s.conversations)) return <div className="chart-empty">No activity in this period.</div>;
   const { W, H, L, R, T, B } = compact ? { ...CHART, H: 260 } : CHART;
   const rows = series.map((s) => {
     const failed = s.failed || 0;
@@ -392,7 +402,7 @@ function VolumeChart({ series, days, title, compact = false }) {
           let acc = 0;
           return (
             <g key={r.t}>
-              <title>{`${bucketLabel(r.t, days)} — ${fmtNum(r.total)} conversations: ${fmtNum(r.completed)} resolved, ${fmtNum(r.other)} not resolved, ${fmtNum(r.failed)} with an error, ${fmtNum(r.blocked)} blocked`}</title>
+              <title>{`${bucketLabel(r.t, days)} — ${fmtNum(r.total)} runs: ${fmtNum(r.completed)} resolved, ${fmtNum(r.other)} not resolved, ${fmtNum(r.failed)} with an error, ${fmtNum(r.blocked)} blocked`}</title>
               {VOLUME_KEYS.map((k) => {
                 const v = r[k.key];
                 if (!v) return null;
@@ -407,7 +417,7 @@ function VolumeChart({ series, days, title, compact = false }) {
         <line className="axis-line" x1={L} x2={W - R} y1={y(0)} y2={y(0)} />
         <XAxisLabels points={rows} x={x} days={days} y0={y(0)} />
         <text className="axis-title" x={(L + W - R) / 2} y={H - 8} textAnchor="middle">{days === 1 ? 'Hour (your local time)' : 'Day'}</text>
-        <text className="axis-title" transform={`translate(16 ${(T + H - B) / 2}) rotate(-90)`} textAnchor="middle">Conversations</text>
+        <text className="axis-title" transform={`translate(16 ${(T + H - B) / 2}) rotate(-90)`} textAnchor="middle">Conversations & runs</text>
       </svg>
       <figcaption>
         <Legend items={VOLUME_KEYS} />
@@ -418,7 +428,7 @@ function VolumeChart({ series, days, title, compact = false }) {
 }
 
 /* ===================================================================== header */
-function Header({ payload, mode, theme, toggleTheme, refresh, refreshing, openHelp, days, setDays, autoRefresh, setAutoRefresh, stale, user, authEnabled }) {
+function Header({ payload, mode, theme, toggleTheme, refresh, refreshing, openHelp, days, setDays, autoRefresh, setAutoRefresh, stale }) {
   const win = payload?.window;
   return (
     <header className="masthead">
@@ -435,7 +445,6 @@ function Header({ payload, mode, theme, toggleTheme, refresh, refreshing, openHe
             <i aria-hidden="true" />
             {mode === 'live' ? (stale ? 'Live data (refresh failed)' : 'Live data') : mode === 'demo' ? 'Demo data' : mode === 'error' ? 'No data' : 'Loading…'}
           </span>
-          {authEnabled && (user ? <span className="user-chip" title="Signed in">{user}</span> : <a className="ghost" href={`/.auth/login/aad?post_login_redirect_uri=${encodeURIComponent(window.location.pathname + window.location.hash)}`}><LogIn size={15} /> Sign in</a>)}
           <button className="ghost" onClick={() => openHelp('start')} type="button" title="How this dashboard works (shortcut: ?)">
             <HelpCircle size={15} /> How it works
           </button>
@@ -450,7 +459,7 @@ function Header({ payload, mode, theme, toggleTheme, refresh, refreshing, openHe
       <div className="period-bar">
         <div className="period-inner">
           <span className="field-label inline">
-            Reporting period <Tip text="Every number, status and chart on every page uses this period." />
+            Reporting period <Tip text="Figures use this period. Agents with no activity in it show their most recent 90 days instead, clearly labelled." />
           </span>
           <Segmented label="Reporting period" options={PERIODS.map((p) => ({ value: p.days, label: p.label }))} value={days} onChange={setDays} />
           <span className="range">{win ? `${fmtDateTime(win.start)} → ${fmtDateTime(win.end)}` : ''}</span>
@@ -499,8 +508,7 @@ function portfolioFigures(agents, library) {
     budgetTotal,
     overBudget: agents.filter((a) => a.metrics.cost.some((m) => m.id === 'spend' && m.rawValue > 100)).length,
     noBudget: agents.filter((a) => !a.budgetUsd && a.billing !== 'included' && a.volume > 0).length,
-    included: agents.filter((a) => a.billing === 'included').length,
-    costPerConv: spends.length && engaged ? sum(spends, (a) => a.spendUsd) / engaged : null,
+    costPerRun: spends.length && engaged ? sum(spends, (a) => a.spendUsd) / engaged : null,
   };
 }
 
@@ -515,7 +523,7 @@ function HeroStat({ label, value, status, tip }) {
   );
 }
 
-function PillarHero({ pillar, agents, figures, days, goAgents, openAgent }) {
+function PillarHero({ pillar, agents, figures, scopeLabel, goAgents, openAgent }) {
   const meta = PILLAR_META[pillar];
   const Icon = meta.icon;
   const counts = countBy(agents, (a) => a.statuses[pillar]);
@@ -523,35 +531,35 @@ function PillarHero({ pillar, agents, figures, days, goAgents, openAgent }) {
   const attention = agents
     .filter((a) => ['red', 'amber'].includes(a.statuses[pillar]))
     .sort((a, b) => STATUS_ORDER.indexOf(a.statuses[pillar]) - STATUS_ORDER.indexOf(b.statuses[pillar]) || b.volume - a.volume);
-  const p = periodOf(days);
   const f = figures;
 
   let big;
   let stats;
   if (pillar === 'health') {
-    big = { value: fmtPct(f.resolvedPct), label: 'of conversations resolved', status: f.resolvedStatus, tip: 'Engaged conversations the agent answered without an error, escalation or fallback, across all connected agents.' };
+    big = { value: fmtPct(f.resolvedPct), label: `of runs resolved · ${scopeLabel}`, status: f.resolvedStatus,
+      tip: 'Conversations and automatic runs that finished without an error, escalation or fallback.' };
     stats = [
-      { label: 'Conversations with errors', value: fmtPct(f.errorPct), status: f.errorStatus },
+      { label: 'Runs with errors', value: fmtPct(f.errorPct), status: f.errorStatus },
       { label: 'User messages answered', value: fmtPct(f.replyPct), status: f.replyStatus },
       { label: 'Slowest agent (95th pct.)', value: f.slowest ? `${Math.round(f.slowest.raw.p95 * 10) / 10}s` : '—', tip: f.slowest ? f.slowest.name : 'Needs at least 10 answered messages' },
     ];
   } else if (pillar === 'risk') {
-    big = { value: fmtNum(f.safetyBlocks), label: `safety blocks · ${p.short}`, status: f.safetyBlocks ? 'amber' : f.engaged ? 'green' : 'unknown',
+    big = { value: fmtNum(f.safetyBlocks), label: `safety blocks · ${scopeLabel}`, status: f.safetyBlocks ? 'amber' : f.engaged ? 'green' : 'unknown',
       tip: 'Requests or answers stopped by the platform guardrails: jailbreaks, attacks hidden in documents, harmful content and data-policy blocks.' };
     stats = [
       { label: 'Jailbreak attempts', value: fmtNum(f.jailbreaks) },
       { label: 'Attacks hidden in documents', value: fmtNum(f.indirect) },
-      { label: 'Harmful content (conversations)', value: fmtNum(f.harmful) },
+      { label: 'Harmful content (runs)', value: fmtNum(f.harmful) },
       { label: 'Data policy (DLP) blocks', value: fmtNum(f.dlp) },
     ];
   } else {
-    big = { value: f.spend !== null ? fmtUsd(f.spend) : '—', label: `estimated spend · ${p.short}`, status: f.overBudget ? 'red' : f.budgetStatus,
-      tip: 'Copilot Studio: answered messages × credits per response × price per credit. Foundry: tokens × model price. An estimate for steering, not an invoice.' };
+    big = { value: f.spend !== null ? fmtUsd(f.spend) : '—', label: `estimated spend · ${scopeLabel}`, status: f.overBudget ? 'red' : f.budgetStatus,
+      tip: 'Copilot Studio: (chat replies + automatic runs) × credits per response × price per credit. Foundry: tokens × model price. An estimate, not an invoice.' };
     stats = [
       { label: 'Budget used', value: f.budgetUsedPct !== null ? `${fmtPct(f.budgetUsedPct)} of ${fmtUsd(f.budgetTotal)}` : 'No budgets set', status: f.budgetStatus },
       { label: 'Agents over budget', value: fmtNum(f.overBudget), status: f.overBudget ? 'red' : f.budgetTotal ? 'green' : '' },
-      { label: 'Active agents without a budget', value: fmtNum(f.noBudget), status: f.noBudget ? 'amber' : '' },
-      { label: 'Cost per conversation', value: f.costPerConv !== null ? fmtUsd(f.costPerConv) : '—' },
+      { label: 'Active agents without a budget', value: fmtNum(f.noBudget), status: f.noBudget ? 'amber' : '', tip: 'Set a monthly budget under Manage agents to rate Cost.' },
+      { label: 'Cost per run', value: f.costPerRun !== null ? fmtUsd(f.costPerRun) : '—' },
     ];
   }
 
@@ -565,23 +573,15 @@ function PillarHero({ pillar, agents, figures, days, goAgents, openAgent }) {
         </div>
         <StatusBadge value={status} />
       </header>
-
       <div className="ph-big">
         <b className={big.status}>{big.value}</b>
-        <span>
-          {big.label} <Tip text={big.tip} />
-        </span>
+        <span>{big.label} <Tip text={big.tip} /></span>
       </div>
-
-      <dl className="hero-stats">
-        {stats.map((s) => <HeroStat key={s.label} {...s} />)}
-      </dl>
-
+      <dl className="hero-stats">{stats.map((s) => <HeroStat key={s.label} {...s} />)}</dl>
       <div className="ph-section">
         <span className="ph-label">Agents by {meta.name.toLowerCase()} status</span>
         <StatusSplit counts={counts} total={agents.length} label={`${meta.name} status of agents`} showLabels />
       </div>
-
       <div className="ph-section">
         <span className="ph-label">Needs attention</span>
         {attention.length ? (
@@ -601,50 +601,49 @@ function PillarHero({ pillar, agents, figures, days, goAgents, openAgent }) {
             })}
           </ul>
         ) : (
-          <p className="ph-none">{agents.some((a) => a.statuses[pillar] !== 'unknown') ? 'No agent needs attention.' : 'Not enough activity to rate yet.'}</p>
+          <p className="ph-none">{agents.some((a) => a.statuses[pillar] !== 'unknown') ? 'No agent needs attention.' : 'Too little activity to rate yet — figures are shown above.'}</p>
         )}
       </div>
-
-      <button className="link-btn ph-more" type="button" onClick={() => goAgents({ pillar, status: 'attention' })} disabled={!attention.length}>
-        {attention.length > 3 ? `See all ${attention.length} agents` : `See ${meta.name.toLowerCase()} details`} <ArrowRight size={13} />
+      <button className="link-btn ph-more" type="button" onClick={() => goAgents(attention.length ? { pillar, status: 'attention' } : {})}>
+        {attention.length > 3 ? `See all ${attention.length} agents` : `See all agents`} <ArrowRight size={13} />
       </button>
     </article>
   );
 }
 
-function buildKeyPoints({ agents, kpis, figures, days }) {
+function buildKeyPoints({ agents, kpis, figures, days, scopeLabel }) {
   const pts = [];
   const counts = countBy(agents, (a) => a.statuses.overall);
   pts.push(
     <>
-      <b>{fmtNum(counts.green || 0)}</b> of {plural(agents.length, 'connected agent')} are healthy; <b>{fmtNum(kpis.attention)}</b> need attention
-      {counts.unknown ? <> and {fmtNum(counts.unknown)} could not be rated (no or too little activity)</> : null}.
+      <b>{plural(agents.length, 'agent')}</b> monitored, <b>{fmtNum(kpis.active)}</b> active in the {periodOf(days).label.toLowerCase()}.{' '}
+      <b>{fmtNum(counts.green || 0)}</b> healthy, <b>{fmtNum(kpis.attention)}</b> need attention
+      {counts.unknown ? <>, {fmtNum(counts.unknown)} with too little activity to rate</> : null}.
     </>
   );
+  if (kpis.widened) {
+    pts.push(<><b>{plural(kpis.widened, 'agent')}</b> had no activity in the {periodOf(days).label.toLowerCase()}, so {kpis.widened === 1 ? 'its' : 'their'} status uses the last 90 days.</>);
+  }
   const red = agents.filter((a) => a.statuses.overall === 'red');
   if (red.length) {
     pts.push(
       <>
-        <b>Action required:</b> {red.slice(0, 4).map((a) => `${a.name}${a.environment !== 'Production' ? ` (${a.environment.toLowerCase()})` : ''}`).join(', ')}
+        <b>Action required:</b> {red.slice(0, 4).map((a) => `${a.name}${a.environment === 'Test only' ? ' (test only)' : ''}`).join(', ')}
         {red.length > 4 ? ` and ${red.length - 4} more` : ''}.
       </>
     );
   }
   if (kpis.nonCompliant) {
-    const fails = {};
-    agents.forEach((a) => a.compliance.filter((c) => !c.pass).forEach((c) => (fails[c.name] = (fails[c.name] || 0) + 1)));
-    const topFail = Object.entries(fails).sort((x, y) => y[1] - x[1])[0];
-    pts.push(<><b>{plural(kpis.nonCompliant, 'agent is', 'agents are')}</b> out of AI policy{topFail ? <>, most often missing “{topFail[0]}”</> : null}.</>);
+    pts.push(<><b>{plural(kpis.nonCompliant, 'agent is', 'agents are')}</b> missing governance details (owners, department, risk tier or approval). Add them under Manage agents.</>);
   }
   if (figures.spend !== null) {
     pts.push(
       <>
-        Estimated spend over the {periodOf(days).short}: <b>{fmtUsd(figures.spend)}</b>
-        {figures.overBudget ? <>; <b>{plural(figures.overBudget, 'agent is', 'agents are')} over budget</b></> : figures.budgetTotal ? <>; no agent is over budget</> : <>; no budgets are set, so spend cannot be judged</>}.
+        Estimated spend ({scopeLabel}): <b>{fmtUsd(figures.spend)}</b>
+        {figures.overBudget ? <>; <b>{plural(figures.overBudget, 'agent is', 'agents are')} over budget</b></> : figures.budgetTotal ? <>; no agent is over budget</> : <>; no budgets are set yet</>}.
       </>
     );
   }
-  if (kpis.discovered) pts.push(<><b>{plural(kpis.discovered, 'agent')}</b> sent telemetry but {kpis.discovered === 1 ? 'is' : 'are'} not connected, so {kpis.discovered === 1 ? 'it is' : 'they are'} not counted.</>);
   return pts;
 }
 
@@ -652,18 +651,18 @@ function OverallStrip({ agents, kpis, days, goAgents, goManage }) {
   const overall = worst(agents.map((a) => a.statuses.overall));
   const healthy = agents.filter((a) => a.statuses.overall === 'green').length;
   const items = [
-    { label: 'Connected agents', value: fmtNum(kpis.connected), def: KPI_DEFS.connected, onClick: goManage },
+    { label: 'Agents monitored', value: fmtNum(kpis.monitored), def: KPI_DEFS.monitored, onClick: goManage },
     { label: 'Active in period', value: fmtNum(kpis.active), def: KPI_DEFS.active },
-    { label: 'Conversations', value: fmtNum(kpis.conversations), def: KPI_DEFS.conversations },
+    { label: 'Conversations & runs', value: fmtNum(kpis.runs), def: KPI_DEFS.runs },
     { label: 'Need attention', value: fmtNum(kpis.attention), def: KPI_DEFS.attention, tone: kpis.attention ? 'amber' : '', onClick: () => goAgents({ status: 'attention' }) },
     { label: 'Out of AI policy', value: fmtNum(kpis.nonCompliant), def: KPI_DEFS.compliance, tone: kpis.nonCompliant ? 'red' : '', onClick: () => goAgents({ nonCompliantOnly: true }) },
     { label: 'Data coverage', value: `${kpis.coverage}%`, def: KPI_DEFS.coverage },
   ];
-  if (kpis.discovered) items.push({ label: 'Not connected', value: fmtNum(kpis.discovered), def: KPI_DEFS.discovered, tone: 'muted', onClick: goManage });
+  if (kpis.widened) items.push({ label: 'Shown from last 90 days', value: fmtNum(kpis.widened), def: KPI_DEFS.widened, tone: 'muted', onClick: () => goAgents({ widenedOnly: true }) });
   return (
     <section className="overall-strip" aria-label="Overall status">
       <div className="os-status">
-        <span className="os-label">Overall status · {periodOf(days).label.toLowerCase()} <Tip text="The worst status of any connected agent." /></span>
+        <span className="os-label">Overall status · {periodOf(days).label.toLowerCase()} <Tip text="The worst status of any monitored agent." /></span>
         <div className="os-line">
           <StatusBadge value={overall} size="sm" />
           <span><b>{healthy}</b> of {plural(agents.length, 'agent')} healthy</span>
@@ -684,31 +683,31 @@ function OverallStrip({ agents, kpis, days, goAgents, goManage }) {
   );
 }
 
-function EmptyConnected({ discovered, goManage, mode }) {
+function NoAgents({ removed, goManage }) {
   return (
     <section className="empty-state panel">
-      <Plug size={30} aria-hidden="true" />
-      <h2>No agents connected yet</h2>
+      <Bot size={30} aria-hidden="true" />
+      <h2>No agent has sent telemetry in the last 90 days</h2>
       <p>
-        The dashboard only monitors agents you connect, so the counts are always right.
-        {discovered ? <> <b>{plural(discovered, 'agent')}</b> sent telemetry in this period and can be connected now.</> : <> No agent has sent telemetry in this period either — check that Application Insights is connected in each agent’s settings, or try a longer period.</>}
+        Agents appear here automatically as soon as they send telemetry to Application Insights. Check that Application Insights is connected in each agent’s
+        settings in Copilot Studio (Settings → Advanced → Application Insights).
+        {removed ? <> {plural(removed, 'agent was', 'agents were')} removed from monitoring and can be restored under Manage agents.</> : null}
       </p>
-      {mode === 'live' && (
-        <button className="primary-solid" type="button" onClick={goManage}>
-          <Plug size={15} /> Connect agents
-        </button>
-      )}
+      <button className="primary-solid" type="button" onClick={goManage}>Go to Manage agents</button>
     </section>
   );
 }
 
-function Overview({ agents, discovered, days, library, kpis, goAgents, goManage, openAgent, mode }) {
-  const figures = useMemo(() => portfolioFigures(agents, library), [agents, library]);
-  const series = useMemo(() => aggregateSeries(agents), [agents]);
+function Overview({ agents, removed, days, library, kpis, goAgents, goManage, openAgent }) {
+  const active = useMemo(() => agents.filter((a) => !a.widened && a.volume > 0), [agents]);
+  const figAgents = active.length ? active : agents;
+  const scopeLabel = active.length ? periodOf(days).short : 'last 90 days';
+  const figures = useMemo(() => portfolioFigures(figAgents, library), [figAgents, library]);
+  const chartAgents = active.length ? active : [];
+  const series = useMemo(() => aggregateSeries(chartAgents), [chartAgents]);
   const thresholds = library?.metrics?.find((m) => m.id === 'failed_execution_rate')?.thresholds || { green: 2, amber: 5 };
   const points = series.map((s) => ({ t: s.t, n: s.conversations, value: s.conversations ? Math.round((1000 * s.failed) / s.conversations) / 10 : null }));
-  const p = periodOf(days);
-  if (!agents.length) return <EmptyConnected discovered={discovered.length} goManage={goManage} mode={mode} />;
+  if (!agents.length) return <NoAgents removed={removed.length} goManage={goManage} />;
 
   const departments = (() => {
     const m = {};
@@ -720,38 +719,39 @@ function Overview({ agents, discovered, days, library, kpis, goAgents, goManage,
     return Object.values(m).sort((x, y) => (x.name === 'Unassigned') - (y.name === 'Unassigned') || y.agents.length - x.agents.length || x.name.localeCompare(y.name));
   })();
   const needAction = agents.filter((a) => ['red', 'amber'].includes(a.statuses.overall));
-  const keyPoints = buildKeyPoints({ agents, kpis, figures, days });
+  const keyPoints = buildKeyPoints({ agents, kpis, figures, days, scopeLabel });
 
   return (
     <>
       <section className="hero-grid" aria-label="Health, risk and cost">
         {PILLARS.map((pl) => (
-          <PillarHero key={pl} pillar={pl} agents={agents} figures={figures} days={days} goAgents={goAgents} openAgent={openAgent} />
+          <PillarHero key={pl} pillar={pl} agents={agents} figures={figures} scopeLabel={scopeLabel} goAgents={goAgents} openAgent={openAgent} />
         ))}
       </section>
+      {!active.length && (
+        <div className="banner info" role="status">
+          <History size={16} /> No agent was active in the {periodOf(days).label.toLowerCase()}, so all figures show each agent’s most recent 90 days.
+        </div>
+      )}
 
       <OverallStrip agents={agents} kpis={kpis} days={days} goAgents={goAgents} goManage={goManage} />
 
-      <Panel title="What leadership should know" subtitle={`Plain-English summary · ${p.label.toLowerCase()}`}>
-        <ul className="key-points">
-          {keyPoints.map((pt, i) => (
-            <li key={i}>{pt}</li>
-          ))}
-        </ul>
+      <Panel title="What leadership should know" subtitle={`Plain-English summary · ${periodOf(days).label.toLowerCase()}`}>
+        <ul className="key-points">{keyPoints.map((pt, i) => <li key={i}>{pt}</li>)}</ul>
       </Panel>
 
       <div className="chart-grid">
-        <Panel title="Conversations over time" subtitle={`Engaged conversations per ${days === 1 ? 'hour' : 'day'}, all connected agents`} tip="Each bar is one hour or day. Colours show how those conversations ended.">
-          <VolumeChart series={series} days={days} title="Conversations over time" />
+        <Panel title="Conversations & runs over time" subtitle={`Per ${days === 1 ? 'hour' : 'day'}, all agents active in the ${periodOf(days).label.toLowerCase()}`} tip="Each bar is one hour or day. Colours show how those conversations and runs ended.">
+          <VolumeChart series={series} days={days} title="Conversations and runs over time" />
         </Panel>
-        <Panel title="Conversations with errors" subtitle="Share of conversations that hit a runtime error, all connected agents" helpSection="health"
-          tip="Same limits as the “Conversations with errors” health metric. Safety blocks are excluded and reported under Risk.">
-          <TrendChart points={points} thresholds={thresholds} days={days} title="Conversations with errors over time" xTitle={days === 1 ? 'Hour (your local time)' : 'Day'}
-            yTitle="% of conversations with an error" seriesLabel="% of conversations with an error" />
+        <Panel title="Runs with errors" subtitle="Share of conversations and runs that hit a runtime error" helpSection="health"
+          tip="Same limits as the “Runs with errors” health metric. Safety blocks are excluded and reported under Risk.">
+          <TrendChart points={points} thresholds={thresholds} days={days} title="Runs with errors over time" xTitle={days === 1 ? 'Hour (your local time)' : 'Day'}
+            yTitle="% of runs with an error" seriesLabel="% of runs with an error" />
         </Panel>
       </div>
 
-      <Panel title="Status by department" subtitle="Overall status of connected agents. Select a department to see its agents." right={<Legend items={STATUS_LEGEND} title="Status colours" />}>
+      <Panel title="Status by department" subtitle="Overall status of monitored agents. Select a department to see its agents. Set departments under Manage agents." right={<Legend items={STATUS_LEGEND} title="Status colours" />}>
         <table className="table dept-table">
           <thead>
             <tr>
@@ -776,44 +776,43 @@ function Overview({ agents, discovered, days, library, kpis, goAgents, goManage,
         </table>
       </Panel>
 
-      <Panel title="Agents needing action" subtitle="Worst first. Select a row to see the evidence.">
-        {needAction.length ? (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th scope="col">Agent</th>
-                  <th scope="col">Department</th>
-                  <th scope="col">Used in</th>
-                  {PILLARS.map((pl) => <th key={pl} scope="col">{PILLAR_META[pl].name}</th>)}
-                  <th scope="col">Overall</th>
-                  <th scope="col">Main issue</th>
+      <Panel title="All agents" subtitle="Worst first. Select a row to see the evidence.">
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Agent</th>
+                <th scope="col">Used in</th>
+                <th scope="col">Runs</th>
+                <th scope="col">Last activity</th>
+                {PILLARS.map((pl) => <th key={pl} scope="col">{PILLAR_META[pl].name}</th>)}
+                <th scope="col">Overall</th>
+                <th scope="col">Main issue</th>
+              </tr>
+            </thead>
+            <tbody>
+              {agents.map((a) => (
+                <tr key={a.id} onClick={() => openAgent(a.id)} tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && openAgent(a.id)}>
+                  <td><b>{a.name}</b>{a.widened && <span className="block"><WidenedTag agent={a} compact /></span>}</td>
+                  <td>{a.environment}</td>
+                  <td>{fmtNum(a.volume)}</td>
+                  <td>{relTime(a.lastSeen)}</td>
+                  {PILLARS.map((pl) => <td key={pl}><StatusBadge value={a.statuses[pl]} size="sm" /></td>)}
+                  <td><StatusBadge value={a.statuses.overall} size="sm" /></td>
+                  <td className="issue">{a.alerts[0] ? <><b>{a.alerts[0].metric}</b> {a.alerts[0].value}</> : '—'}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {needAction.map((a) => (
-                  <tr key={a.id} onClick={() => openAgent(a.id)} tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && openAgent(a.id)}>
-                    <td><b>{a.name}</b></td>
-                    <td>{a.department}</td>
-                    <td>{a.environment}</td>
-                    {PILLARS.map((pl) => <td key={pl}><StatusBadge value={a.statuses[pl]} size="sm" /></td>)}
-                    <td><StatusBadge value={a.statuses.overall} size="sm" /></td>
-                    <td className="issue">{a.alerts[0] ? <><b>{a.alerts[0].metric}</b> {a.alerts[0].value}</> : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="chart-empty">No connected agent currently needs action.</div>
-        )}
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {needAction.length === 0 && <p className="muted small-note">No agent currently needs action.</p>}
       </Panel>
     </>
   );
 }
 
 /* ================================================================ agents tab */
-const EMPTY_FILTERS = { status: 'all', pillar: 'overall', environment: 'all', department: 'all', location: 'all', owner: 'all', platform: 'all', riskTier: 'all', nonCompliantOnly: false, query: '' };
+const EMPTY_FILTERS = { status: 'all', pillar: 'overall', environment: 'all', department: 'all', location: 'all', owner: 'all', platform: 'all', riskTier: 'all', nonCompliantOnly: false, widenedOnly: false, query: '' };
 
 function applyFilters(agents, f) {
   const q = f.query.trim().toLowerCase();
@@ -826,6 +825,7 @@ function applyFilters(agents, f) {
       if (f[field] !== 'all' && fieldValue(a, field) !== f[field]) return false;
     }
     if (f.nonCompliantOnly && a.compliant) return false;
+    if (f.widenedOnly && !a.widened) return false;
     if (q && !`${a.name} ${a.purpose || ''} ${a.department} ${a.businessOwner || ''} ${a.technicalOwner || ''} ${(a.telemetryNames || []).join(' ')}`.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -843,6 +843,7 @@ function AgentCard({ agent, openAgent }) {
         </div>
         <StatusBadge value={agent.statuses.overall} size="sm" />
       </div>
+      {agent.widened && <WidenedTag agent={agent} />}
       <p className="purpose">{agent.purpose || <em>No purpose recorded — add it under Manage agents.</em>}</p>
       <p className={`headline ${agent.statuses.overall}`}>{agentHeadline(agent)}</p>
       <div className="pillar-row" role="group" aria-label="Status by area">
@@ -857,16 +858,16 @@ function AgentCard({ agent, openAgent }) {
         })}
       </div>
       <dl className="agent-meta">
-        <div><dt>Business owner</dt><dd>{agent.businessOwner || <em>Not assigned</em>}</dd></div>
-        <div><dt>Conversations</dt><dd>{fmtNum(agent.volume)}</dd></div>
+        <div><dt>Runs{agent.widened ? ` (${agent.dataDays} days)` : ''}</dt><dd>{fmtNum(agent.volume)}{agent.autoRuns ? <small className="muted"> · {fmtNum(agent.autoRuns)} automatic</small> : null}</dd></div>
         <div><dt>Last activity</dt><dd>{relTime(agent.lastSeen)}</dd></div>
+        <div><dt>Business owner</dt><dd>{agent.businessOwner || <em>Not assigned</em>}</dd></div>
         <div><dt>Est. spend</dt><dd>{agent.billing === 'included' ? 'Included' : agent.spendUsd !== null ? fmtUsd(agent.spendUsd) : '—'}</dd></div>
       </dl>
       <footer>
         {agent.compliant ? (
           <span className="comp ok"><CheckCircle2 size={14} /> In AI policy</span>
         ) : (
-          <span className="comp bad"><XCircle size={14} /> Out of AI policy: {agent.compliance.filter((c) => !c.pass).length} check(s) failed</span>
+          <span className="comp bad"><XCircle size={14} /> Missing details: {agent.compliance.filter((c) => !c.pass).length} check(s)</span>
         )}
         <span className="open-hint">Open <ChevronRight size={14} /></span>
       </footer>
@@ -890,17 +891,14 @@ function Agents({ agents, filters, setFilters, groupBy, setGroupBy, openAgent, g
   }, [shown, groupBy]);
 
   if (!agents.length) {
-    return (
-      <div className="chart-empty">
-        No agents are connected. <button className="link-btn" type="button" onClick={goManage}>Go to Manage agents</button>
-      </div>
-    );
+    return <div className="chart-empty">No agent has sent telemetry in the last 90 days. <button className="link-btn" type="button" onClick={goManage}>Go to Manage agents</button></div>;
   }
 
   const active = Object.entries(filters).filter(([k, v]) => v !== EMPTY_FILTERS[k] && k !== 'pillar');
   const describe = ([k, v]) => {
     if (k === 'status') return `${filters.pillar !== 'overall' ? PILLAR_META[filters.pillar].name : 'Status'}: ${v === 'attention' ? 'Need attention' : STATUS_LABELS[v]}`;
     if (k === 'nonCompliantOnly') return 'Out of AI policy only';
+    if (k === 'widenedOnly') return 'Shown from last 90 days';
     if (k === 'query') return `Search: “${v}”`;
     const names = { environment: 'Used in', department: 'Department', location: 'Location', owner: 'Owner', platform: 'Platform', riskTier: 'Risk tier' };
     return `${names[k]}: ${v}`;
@@ -914,7 +912,7 @@ function Agents({ agents, filters, setFilters, groupBy, setGroupBy, openAgent, g
             <span className="field-label">Search agents</span>
             <span className="search">
               <Search size={15} aria-hidden="true" />
-              <input value={filters.query} onChange={(e) => set({ query: e.target.value })} placeholder="Name, purpose, owner or ID" />
+              <input value={filters.query} onChange={(e) => set({ query: e.target.value })} placeholder="Name, purpose, owner or telemetry ID" />
               {filters.query && <button type="button" className="clear" onClick={() => set({ query: '' })} aria-label="Clear search"><X size={14} /></button>}
             </span>
           </label>
@@ -926,7 +924,7 @@ function Agents({ agents, filters, setFilters, groupBy, setGroupBy, openAgent, g
             options={[{ value: 'all', label: 'All' }, ...ENVIRONMENTS.map((e) => ({ value: e, label: e }))]} />
         </div>
         <div className="filter-actions">
-          <button className="ghost small" type="button" onClick={() => setMore((m) => !m)} aria-expanded={more}>
+          <button className="ghost-btn small" type="button" onClick={() => setMore((m) => !m)} aria-expanded={more}>
             <SlidersHorizontal size={14} /> {more ? 'Fewer filters' : 'More filters'}
           </button>
           <label className="check">
@@ -934,7 +932,7 @@ function Agents({ agents, filters, setFilters, groupBy, setGroupBy, openAgent, g
             Out of AI policy only
           </label>
           <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={Object.entries(GROUP_FIELDS).map(([value, label]) => ({ value, label }))} />
-          <button className="ghost small" type="button" onClick={() => setFilters(EMPTY_FILTERS)} disabled={!active.length}>Reset filters</button>
+          <button className="ghost-btn small" type="button" onClick={() => setFilters(EMPTY_FILTERS)} disabled={!active.length}>Reset filters</button>
         </div>
         {more && (
           <div className="filter-grid more">
@@ -947,7 +945,7 @@ function Agents({ agents, filters, setFilters, groupBy, setGroupBy, openAgent, g
       </section>
 
       <div className="result-line" aria-live="polite">
-        Showing <b>{shown.length}</b> of {plural(agents.length, 'connected agent')}
+        Showing <b>{shown.length}</b> of {plural(agents.length, 'monitored agent')}
         {groupBy !== 'none' && <> in {plural(groups.length, 'group')}</>}
         {active.length > 0 && (
           <span className="active-filters">
@@ -1008,35 +1006,36 @@ function MetricRow({ metric }) {
   );
 }
 
-function AgentDetail({ agent, pillar, setPillar, back, days, library, canEdit, onEdit, onDisconnect }) {
+function AgentDetail({ agent, pillar, setPillar, back, library, canEdit, onEdit, onRemove }) {
   const { openHelp } = useApp();
   const metrics = agent.metrics[pillar] || [];
-  const measured = metrics.filter((m) => m.measured !== false && m.value !== 'Not available');
-  const unmeasured = metrics.filter((m) => !measured.includes(m));
+  // Show every metric that has a value (even when there is too little activity to rate it).
+  const shown = metrics.filter((m) => m.value !== 'Not available');
+  const unavailable = metrics.filter((m) => m.value === 'Not available');
   const components = library?.healthComponents || {};
   const grouped =
     pillar === 'health'
-      ? Object.entries(components).map(([key, label]) => ({ key, label, rows: measured.filter((m) => m.component === key) })).filter((g) => g.rows.length)
-      : [{ key: 'all', label: null, rows: measured }];
+      ? Object.entries(components).map(([key, label]) => ({ key, label, rows: shown.filter((m) => m.component === key) })).filter((g) => g.rows.length)
+      : [{ key: 'all', label: null, rows: shown }];
   const facts = [
+    ['Telemetry ID', agent.id],
     ['Department', agent.department],
-    ['Location', agent.location],
     ['Used in', agent.environment],
     ['Risk tier', agent.riskTier || 'Not assigned'],
     ['Approval', agent.approvalStatus || 'None'],
     ['Business owner', agent.businessOwner || 'Not assigned'],
     ['Technical owner', agent.technicalOwner || 'Not assigned'],
-    ['Live since', agent.productionDays !== null ? `${agent.productionDays} days` : '—'],
     ['Last activity', relTime(agent.lastSeen)],
   ];
+  const days = agent.dataDays;
   return (
     <>
       <div className="detail-actions">
         <button className="back" onClick={back} type="button"><ArrowLeft size={15} /> Back</button>
         {canEdit && (
           <span className="spacer-actions">
-            <button className="back" type="button" onClick={() => onEdit(agent)}><Pencil size={14} /> Edit profile</button>
-            <button className="back danger" type="button" onClick={() => onDisconnect(agent)}><Trash2 size={14} /> Disconnect</button>
+            <button className="back" type="button" onClick={() => onEdit(agent)}><Pencil size={14} /> Edit details</button>
+            <button className="back danger" type="button" onClick={() => onRemove(agent)}><EyeOff size={14} /> Stop monitoring</button>
           </span>
         )}
       </div>
@@ -1044,14 +1043,15 @@ function AgentDetail({ agent, pillar, setPillar, back, days, library, canEdit, o
         <div className="ah-main">
           <span className="eyebrow">{agent.platform}</span>
           <h2>{agent.name}</h2>
-          <p>{agent.purpose || 'No purpose recorded.'}</p>
+          <p>{agent.purpose || 'No purpose recorded yet — select Edit details to add it.'}</p>
         </div>
         <div className="ah-status">
           <span className="field-label">Overall status</span>
           <StatusBadge value={agent.statuses.overall} />
           <span className="field-label">AI policy</span>
-          {agent.compliant ? <span className="comp ok pill"><CheckCircle2 size={14} /> In policy</span> : <span className="comp bad pill"><XCircle size={14} /> Out of policy</span>}
+          {agent.compliant ? <span className="comp ok pill"><CheckCircle2 size={14} /> In policy</span> : <span className="comp bad pill"><XCircle size={14} /> Missing details</span>}
         </div>
+        {agent.widened && <p className="widened-hero"><History size={14} /> {widenedText(agent)}.</p>}
         <p className={`headline big ${agent.statuses.overall}`}>
           <b>{STATUS_LABELS[agent.statuses.overall]}:</b> {agentHeadline(agent)}
         </p>
@@ -1065,13 +1065,13 @@ function AgentDetail({ agent, pillar, setPillar, back, days, library, canEdit, o
       <div className="pillar-tabs" role="tablist" aria-label="Evidence area">
         {PILLARS.map((p) => {
           const Icon = PILLAR_META[p].icon;
-          const n = agent.metrics[p].filter((m) => m.measured !== false && m.value !== 'Not available').length;
+          const n = agent.metrics[p].filter((m) => m.measured).length;
           return (
             <button key={p} type="button" role="tab" aria-selected={pillar === p} className={pillar === p ? 'active' : ''} onClick={() => setPillar(p)}>
               <Icon size={22} aria-hidden="true" />
               <span className="pt-copy">
                 <b>{PILLAR_META[p].name}</b>
-                <small>{PILLAR_META[p].question} · {n} of {agent.metrics[p].length} measured</small>
+                <small>{PILLAR_META[p].question} · {n} of {agent.metrics[p].length} rated</small>
               </span>
               <StatusBadge value={agent.statuses[p]} />
             </button>
@@ -1080,7 +1080,8 @@ function AgentDetail({ agent, pillar, setPillar, back, days, library, canEdit, o
       </div>
 
       <div className="detail-grid">
-        <Panel title={`${PILLAR_META[pillar].name} evidence`} subtitle={library?.pillars?.[pillar]?.definition} right={<StatusBadge value={agent.statuses[pillar]} />} helpSection={pillar}>
+        <Panel title={`${PILLAR_META[pillar].name} evidence`} subtitle={`${library?.pillars?.[pillar]?.definition || ''} Figures cover the last ${days === 1 ? '24 hours' : `${days} days`}.`}
+          right={<StatusBadge value={agent.statuses[pillar]} />} helpSection={pillar}>
           {grouped.map((g) => (
             <div key={g.key} className="component">
               {g.label && (
@@ -1092,29 +1093,29 @@ function AgentDetail({ agent, pillar, setPillar, back, days, library, canEdit, o
               {g.rows.map((m) => <MetricRow key={m.id} metric={m} />)}
             </div>
           ))}
-          {!measured.length && <div className="chart-empty">Nothing in this area could be measured in the selected period.</div>}
-          {unmeasured.length > 0 && (
+          {!shown.length && <div className="chart-empty">No figures in this area for this agent.</div>}
+          {unavailable.length > 0 && (
             <details className="unmeasured">
-              <summary>Not measured ({unmeasured.length}) — why these show “No data”</summary>
-              <ul>{unmeasured.map((m) => <li key={m.id}><b>{m.name}</b> — {m.why}</li>)}</ul>
+              <summary>Not available yet ({unavailable.length}) — why</summary>
+              <ul>{unavailable.map((m) => <li key={m.id}><b>{m.name}</b> — {m.why}</li>)}</ul>
               <button className="link-btn" type="button" onClick={() => openHelp('data')}>Where does the data come from?</button>
             </details>
           )}
         </Panel>
 
         <div className="side">
-          <Panel title="Activity" subtitle={`Conversations per ${days === 1 ? 'hour' : 'day'} · ${periodOf(days).label.toLowerCase()}`}>
-            <VolumeChart series={agent.series} days={days} title={`${agent.name} conversations over time`} compact />
+          <Panel title="Activity" subtitle={`Per ${days === 1 ? 'hour' : 'day'} · last ${days === 1 ? '24 hours' : `${days} days`}`}>
+            <VolumeChart series={agent.series} days={days} title={`${agent.name} activity over time`} compact />
             <dl className="stat-strip">
-              <div><dt>Conversations</dt><dd>{fmtNum(agent.volume)}</dd></div>
+              <div><dt>Runs</dt><dd>{fmtNum(agent.volume)}</dd></div>
+              <div><dt>Automatic runs</dt><dd>{fmtNum(agent.autoRuns)}</dd></div>
               <div><dt>User messages</dt><dd>{fmtNum(agent.userTurns)}</dd></div>
               <div><dt>Error events</dt><dd>{fmtNum(agent.errorEvents)}</dd></div>
               <div><dt>{agent.billing === 'tokens' ? 'Tokens' : 'Copilot Credits (est.)'}</dt><dd>{agent.billing === 'tokens' ? fmtNum(agent.tokens) : agent.billing === 'included' ? 'Included' : fmtNum(agent.credits)}</dd></div>
               <div><dt>Est. spend</dt><dd>{agent.billing === 'included' ? 'Included' : fmtUsd(agent.spendUsd)}</dd></div>
-              <div><dt>Budget for period</dt><dd>{agent.budgetUsd ? fmtUsd(agent.budgetUsd) : 'Not set'}</dd></div>
             </dl>
           </Panel>
-          <Panel title="AI policy checks" helpSection="policy" tip="Automatic: telemetry compared with the agent profile.">
+          <Panel title="AI policy checks" helpSection="policy" tip="Automatic: telemetry compared with the agent details. Fix by selecting Edit details.">
             <ul className="checks">
               {agent.compliance.map((c) => (
                 <li key={c.id} className={c.pass ? 'ok' : 'bad'}>
@@ -1136,7 +1137,7 @@ function AgentDetail({ agent, pillar, setPillar, back, days, library, canEdit, o
               </table>
             </Panel>
           )}
-          <Panel title="Telemetry names" tip="Names under which this agent appears in telemetry. Edit the profile to add aliases.">
+          <Panel title="Telemetry names" tip="Names this agent appears under in Application Insights. Add extra names under Edit details so they are counted as one agent.">
             <div className="codes">{(agent.telemetryNames || [agent.id]).map((n) => <code key={n}>{n}</code>)}</div>
           </Panel>
         </div>
@@ -1148,9 +1149,19 @@ function AgentDetail({ agent, pillar, setPillar, back, days, library, canEdit, o
 /* ============================================================ manage agents */
 const EMPTY_PROFILE = {
   id: '', displayName: '', aliases: [], purpose: '', department: '', location: '', businessOwner: '', technicalOwner: '',
-  platform: 'Microsoft Copilot Studio', riskTier: '', approvalStatus: '', productionSince: '', monthlyBudgetUsd: '', billingModel: '',
-  creditsPerResponse: '', allowedConnectors: [], notes: '',
+  platform: '', riskTier: '', approvalStatus: '', productionSince: '', monthlyBudgetUsd: '', billingModel: '',
+  creditsPerResponse: '', allowedConnectors: [],
 };
+
+function FormField({ label, hint, required, wide, children }) {
+  return (
+    <label className={`form-field ${wide ? 'wide' : ''}`}>
+      <span className="field-label">{label}{required && <span className="req" aria-hidden="true"> *</span>}</span>
+      {children}
+      {hint && <small>{hint}</small>}
+    </label>
+  );
+}
 
 function AgentForm({ initial, mode, onCancel, onSave, departments }) {
   const [v, setV] = useState(() => ({
@@ -1162,14 +1173,14 @@ function AgentForm({ initial, mode, onCancel, onSave, departments }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const set = (k) => (e) => setV((s) => ({ ...s, [k]: e.target.value }));
-  const editingId = mode === 'edit';
+  const editing = mode === 'edit';
 
   const submit = async (e) => {
     e.preventDefault();
     setSaving(true);
     setError(null);
     try {
-      await onSave({ ...v, aliases: v.aliases, allowedConnectors: v.allowedConnectors });
+      await onSave(v);
     } catch (err) {
       setError(err.message);
       setSaving(false);
@@ -1181,21 +1192,17 @@ function AgentForm({ initial, mode, onCancel, onSave, departments }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onCancel]);
 
-  const F = ({ k, label, hint, type = 'text', required, wide, children, readOnly }) => (
-    <label className={`form-field ${wide ? 'wide' : ''}`}>
-      <span className="field-label">{label}{required && <span className="req" aria-hidden="true"> *</span>}</span>
-      {children || <input type={type} value={v[k]} onChange={set(k)} required={required} readOnly={readOnly} min={type === 'number' ? 0 : undefined} step={type === 'number' ? 'any' : undefined} />}
-      {hint && <small>{hint}</small>}
-    </label>
-  );
-
   return (
-    <div className="modal-wrap" role="dialog" aria-modal="true" aria-label={editingId ? 'Edit agent' : 'Connect agent'} onClick={(e) => e.target === e.currentTarget && onCancel()}>
+    <div className="modal-wrap" role="dialog" aria-modal="true" aria-label={editing ? 'Edit agent details' : 'Add agent'} onClick={(e) => e.target === e.currentTarget && onCancel()}>
       <form className="modal" onSubmit={submit}>
         <header className="modal-head">
           <div>
-            <h2>{editingId ? `Edit ${initial.displayName || initial.id}` : 'Connect an agent'}</h2>
-            <p>{editingId ? 'Changes apply to the dashboard straight away.' : 'Once connected, the agent is monitored and counted. Only the telemetry ID is required; the rest powers the AI policy checks.'}</p>
+            <h2>{editing ? `Edit details · ${initial.displayName || initial.id}` : 'Add an agent by hand'}</h2>
+            <p>
+              {editing
+                ? 'All fields are optional. They add context and drive the AI policy checks and the Cost rating.'
+                : 'Only needed for an agent that has not sent telemetry yet. Agents that send telemetry appear automatically.'}
+            </p>
           </div>
           <button type="button" className="icon" onClick={onCancel} aria-label="Close"><X size={20} /></button>
         </header>
@@ -1203,102 +1210,109 @@ function AgentForm({ initial, mode, onCancel, onSave, departments }) {
           <fieldset>
             <legend>Identity</legend>
             <div className="form-grid">
-              {F({ k: 'id', label: 'Telemetry ID', required: true, readOnly: editingId || initial?.fromDiscovery,
-                hint: 'Schema name (e.g. cr4f2_contractBot) or bot name exactly as in Application Insights. Cannot be changed later.' })}
-              {F({ k: 'displayName', label: 'Display name', hint: 'Name shown on the dashboard.' })}
-              {F({ k: 'aliases', label: 'Other telemetry names', wide: true, hint: 'Comma-separated. Any other names this agent appears under, so its conversations are not split.' })}
+              <FormField label="Telemetry ID" required={!editing} hint="Schema name exactly as in Application Insights (e.g. sps_dailyCyberPrivacyBriefing).">
+                <input value={v.id} onChange={set('id')} required readOnly={editing} />
+              </FormField>
+              <FormField label="Display name" hint="Name shown on the dashboard.">
+                <input value={v.displayName} onChange={set('displayName')} placeholder="e.g. Daily Cyber Privacy Briefing" />
+              </FormField>
+              <FormField label="Other telemetry names" wide hint="Comma-separated. Other names this agent appears under, so its activity is counted as one agent.">
+                <input value={v.aliases} onChange={set('aliases')} />
+              </FormField>
             </div>
           </fieldset>
           <fieldset>
             <legend>Ownership and purpose</legend>
             <div className="form-grid">
-              {F({ k: 'purpose', label: 'Purpose', wide: true, children: <textarea rows={2} value={v.purpose} onChange={set('purpose')} placeholder="What the agent does, in one sentence" /> })}
-              {F({ k: 'department', label: 'Department', children: (
-                <>
-                  <input list="dept-list" value={v.department} onChange={set('department')} />
-                  <datalist id="dept-list">{departments.map((d) => <option key={d} value={d} />)}</datalist>
-                </>
-              ) })}
-              {F({ k: 'location', label: 'Location' })}
-              {F({ k: 'businessOwner', label: 'Business owner' })}
-              {F({ k: 'technicalOwner', label: 'Technical owner' })}
+              <FormField label="Purpose" wide>
+                <textarea rows={2} value={v.purpose} onChange={set('purpose')} placeholder="What the agent does, in one sentence" />
+              </FormField>
+              <FormField label="Department">
+                <input list="dept-list" value={v.department} onChange={set('department')} />
+                <datalist id="dept-list">{departments.map((d) => <option key={d} value={d} />)}</datalist>
+              </FormField>
+              <FormField label="Location"><input value={v.location} onChange={set('location')} /></FormField>
+              <FormField label="Business owner"><input value={v.businessOwner} onChange={set('businessOwner')} /></FormField>
+              <FormField label="Technical owner"><input value={v.technicalOwner} onChange={set('technicalOwner')} /></FormField>
             </div>
           </fieldset>
           <fieldset>
             <legend>Governance</legend>
             <div className="form-grid">
-              {F({ k: 'riskTier', label: 'Risk tier', children: (
+              <FormField label="Risk tier">
                 <select value={v.riskTier} onChange={set('riskTier')}><option value="">Not assigned</option><option>Low</option><option>Medium</option><option>High</option></select>
-              ) })}
-              {F({ k: 'approvalStatus', label: 'Approval status', children: (
+              </FormField>
+              <FormField label="Approval status" hint="Production use requires “Approved” to pass the AI policy check.">
                 <select value={v.approvalStatus} onChange={set('approvalStatus')}>
                   <option value="">None</option><option>Approved</option><option>In review</option><option>Rejected</option><option>Retired</option>
                 </select>
-              ), hint: 'Production use requires “Approved” to pass the AI policy check.' })}
-              {F({ k: 'productionSince', label: 'In production since', type: 'date' })}
-              {F({ k: 'platform', label: 'Platform', children: (
-                <select value={v.platform} onChange={set('platform')}><option>Microsoft Copilot Studio</option><option>Azure AI Foundry</option><option>Custom / SDK</option></select>
-              ) })}
-              {F({ k: 'allowedConnectors', label: 'Allowed connectors', wide: true, hint: 'Comma-separated, e.g. SharePoint, Workday.' })}
+              </FormField>
+              <FormField label="In production since"><input type="date" value={v.productionSince} onChange={set('productionSince')} /></FormField>
+              <FormField label="Platform">
+                <select value={v.platform} onChange={set('platform')}>
+                  <option value="">Automatic</option><option>Microsoft Copilot Studio</option><option>Azure AI Foundry</option><option>Custom / SDK</option>
+                </select>
+              </FormField>
+              <FormField label="Allowed connectors" wide hint="Comma-separated, e.g. SharePoint, Workday."><input value={v.allowedConnectors} onChange={set('allowedConnectors')} /></FormField>
             </div>
           </fieldset>
           <fieldset>
             <legend>Cost</legend>
             <div className="form-grid">
-              {F({ k: 'monthlyBudgetUsd', label: 'Monthly budget (USD)', type: 'number', hint: 'Needed to rate Cost. Pro-rated to the reporting period.' })}
-              {F({ k: 'billingModel', label: 'Billing model', children: (
+              <FormField label="Monthly budget (USD)" hint="Needed to rate Cost. Pro-rated to the reporting period.">
+                <input type="number" min={0} step="any" value={v.monthlyBudgetUsd} onChange={set('monthlyBudgetUsd')} />
+              </FormField>
+              <FormField label="Billing model">
                 <select value={v.billingModel} onChange={set('billingModel')}>
                   <option value="">Automatic (by platform)</option>
                   <option value="copilot-credits">Copilot Credits</option>
                   <option value="m365-copilot">Included in Microsoft 365 Copilot licences</option>
                   <option value="tokens">Model tokens (Foundry / SDK)</option>
                 </select>
-              ) })}
-              {F({ k: 'creditsPerResponse', label: 'Copilot Credits per response', type: 'number', hint: 'Classic answer 1 · generative answer 2 (default) · agent action 5 · tenant graph grounding 10.' })}
+              </FormField>
+              <FormField label="Copilot Credits per response" hint="Classic answer 1 · generative answer 2 (default) · agent action 5 · tenant graph grounding 10.">
+                <input type="number" min={0} step="any" value={v.creditsPerResponse} onChange={set('creditsPerResponse')} />
+              </FormField>
             </div>
           </fieldset>
         </div>
         {error && <div className="form-error" role="alert"><AlertTriangle size={15} /> {error}</div>}
         <footer className="modal-foot">
           <button type="button" className="ghost-btn" onClick={onCancel}>Cancel</button>
-          <button type="submit" className="primary-solid" disabled={saving}>{saving ? 'Saving…' : editingId ? 'Save changes' : 'Connect agent'}</button>
+          <button type="submit" className="primary-solid" disabled={saving}>{saving ? 'Saving…' : editing ? 'Save details' : 'Add agent'}</button>
         </footer>
       </form>
     </div>
   );
 }
 
-function Manage({ agents, discovered, payload, mode, canEdit, signInNeeded, onConnect, onConnectMany, onEdit, onDisconnect, openAgent, busy, days }) {
+function Manage({ agents, removed, payload, mode, onAdd, onEdit, onRemove, onRestore, openAgent, busy }) {
   const storage = payload?.sources?.registry;
   const readOnly = mode !== 'live';
   const [q, setQ] = useState('');
-  const shown = agents.filter((a) => !q || `${a.name} ${a.id} ${a.department}`.toLowerCase().includes(q.toLowerCase()));
-  const sorted = [...shown].sort((a, b) => a.name.localeCompare(b.name));
+  const shown = agents.filter((a) => !q || `${a.name} ${a.id} ${a.department}`.toLowerCase().includes(q.toLowerCase())).sort((a, b) => a.name.localeCompare(b.name));
   return (
     <>
       <section className="intro">
-        <h2>Manage connected agents</h2>
+        <h2>Manage agents</h2>
         <p>
-          Only <b>connected</b> agents are monitored and counted on this dashboard. Connect an agent once it sends telemetry to Application Insights, and disconnect it when it is retired.
-          Disconnecting never deletes telemetry; it only stops the agent being monitored.
+          Every agent that sends telemetry to Application Insights is <b>monitored automatically</b> — there is nothing to connect. Use this page to add details
+          (name, purpose, department, owners, risk tier, budget) or to stop monitoring an agent you don’t need, such as a test agent.
         </p>
-        {readOnly && <div className="warn"><Info size={15} /> Demo data is read-only. Switch to live data to connect or remove agents.</div>}
-        {!readOnly && signInNeeded && (
-          <div className="warn"><LogIn size={15} /> <span>Sign in to connect, edit or remove agents. <a href={`/.auth/login/aad?post_login_redirect_uri=${encodeURIComponent('/#/manage')}`}>Sign in</a></span></div>
-        )}
+        {readOnly && <div className="warn"><Info size={15} /> Demo data is read-only. Switch to live data to make changes.</div>}
         {storage?.warning && <div className="warn"><AlertTriangle size={15} /> {storage.warning}</div>}
       </section>
 
       <Panel
-        title={`Connected agents (${agents.length})`}
-        subtitle={storage ? `Stored in: ${storage.label}` : undefined}
+        title={`Monitored agents (${agents.length})`}
+        subtitle="Agents seen in the last 90 days, plus any added by hand."
         right={
           <div className="manage-tools">
             <span className="search small-search">
               <Search size={14} aria-hidden="true" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter connected agents" aria-label="Filter connected agents" />
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter agents" aria-label="Filter agents" />
             </span>
-            {canEdit && <button className="primary-solid" type="button" onClick={() => onConnect(null)}><Plus size={15} /> Connect manually</button>}
+            {!readOnly && <button className="ghost-btn" type="button" onClick={onAdd}><Plus size={15} /> Add by hand</button>}
           </div>
         }
       >
@@ -1312,76 +1326,62 @@ function Manage({ agents, discovered, payload, mode, canEdit, signInNeeded, onCo
                   <th scope="col">Department</th>
                   <th scope="col">Business owner</th>
                   <th scope="col">Last activity</th>
-                  <th scope="col">AI policy</th>
+                  <th scope="col">Details</th>
                   <th scope="col"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
-                {sorted.map((a) => (
-                  <tr key={a.id}>
-                    <td><button className="link-btn strong" type="button" onClick={() => openAgent(a.id)}>{a.name}</button></td>
-                    <td><code>{a.id}</code></td>
-                    <td>{a.department}</td>
-                    <td>{a.businessOwner || <em className="missing">Not assigned</em>}</td>
-                    <td>{relTime(a.lastSeen)}</td>
-                    <td>{a.compliant ? <span className="comp ok"><CheckCircle2 size={14} /> In policy</span> : <span className="comp bad"><XCircle size={14} /> {a.compliance.filter((c) => !c.pass).length} failed</span>}</td>
-                    <td className="row-actions">
-                      {canEdit && (
-                        <>
-                          <button className="icon-btn" type="button" onClick={() => onEdit(a)} title={`Edit ${a.name}`} aria-label={`Edit ${a.name}`}><Pencil size={15} /></button>
-                          <button className="icon-btn danger" type="button" onClick={() => onDisconnect(a)} title={`Disconnect ${a.name}`} aria-label={`Disconnect ${a.name}`} disabled={busy}><Trash2 size={15} /></button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {shown.map((a) => {
+                  const missing = a.compliance.filter((c) => !c.pass).length;
+                  return (
+                    <tr key={a.id}>
+                      <td><button className="link-btn strong" type="button" onClick={() => openAgent(a.id)}>{a.name}</button></td>
+                      <td><code>{a.id}</code></td>
+                      <td>{a.department}</td>
+                      <td>{a.businessOwner || <em className="missing">Not assigned</em>}</td>
+                      <td>{relTime(a.lastSeen)}</td>
+                      <td>{missing ? <span className="comp bad"><XCircle size={14} /> {missing} missing</span> : <span className="comp ok"><CheckCircle2 size={14} /> Complete</span>}</td>
+                      <td className="row-actions">
+                        {!readOnly && (
+                          <>
+                            <button className="ghost-btn small" type="button" onClick={() => onEdit(a)}><Pencil size={14} /> Edit details</button>
+                            <button className="icon-btn danger" type="button" onClick={() => onRemove(a)} title={`Stop monitoring ${a.name}`} aria-label={`Stop monitoring ${a.name}`} disabled={busy}><EyeOff size={15} /></button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         ) : (
-          <div className="chart-empty">No agents connected yet. Connect them from the list below.</div>
+          <div className="chart-empty">No agent has sent telemetry in the last 90 days.</div>
         )}
       </Panel>
 
-      <Panel
-        title={`Sending telemetry but not connected (${discovered.length})`}
-        subtitle={`Agents seen in Application Insights in the ${periodOf(days).label.toLowerCase()} that are not monitored. Choose a longer period to find agents that are used less often.`}
-        tip={KPI_DEFS.discovered}
-        right={canEdit && discovered.length > 1 ? <button className="ghost-btn" type="button" disabled={busy} onClick={() => onConnectMany(discovered)}><Plug size={15} /> Connect all {discovered.length}</button> : null}
-      >
-        {discovered.length ? (
+      {removed.length > 0 && (
+        <Panel title={`Not monitored (${removed.length})`} subtitle="Agents you stopped monitoring. Their telemetry is kept; restore them at any time.">
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr>
-                  <th scope="col">Name in telemetry</th>
-                  <th scope="col">Telemetry ID</th>
-                  <th scope="col">Conversations</th>
-                  <th scope="col">Used in</th>
-                  <th scope="col">Last activity</th>
-                  <th scope="col"><span className="sr-only">Actions</span></th>
-                </tr>
+                <tr><th scope="col">Agent</th><th scope="col">Telemetry ID</th><th scope="col">Runs (90 days)</th><th scope="col">Last activity</th><th scope="col"><span className="sr-only">Actions</span></th></tr>
               </thead>
               <tbody>
-                {discovered.map((d) => (
-                  <tr key={d.id}>
-                    <td><b>{d.name}</b>{(() => { const other = d.names.filter((n) => n !== d.name && n !== d.id); return other.length ? <small className="muted block">Also seen as: {other.join(', ')}</small> : null; })()}</td>
-                    <td><code>{d.id}</code></td>
-                    <td>{fmtNum(d.conversations)}</td>
-                    <td>{d.environment}</td>
-                    <td>{relTime(d.lastSeen)}</td>
-                    <td className="row-actions">
-                      {canEdit && <button className="primary-solid small" type="button" onClick={() => onConnect({ ...d.suggestion, id: d.id, fromDiscovery: true })}><Plug size={14} /> Connect</button>}
-                    </td>
+                {removed.map((r) => (
+                  <tr key={r.id}>
+                    <td><b>{r.name}</b></td>
+                    <td><code>{r.id}</code></td>
+                    <td>{fmtNum(r.runs)}</td>
+                    <td>{relTime(r.lastSeen)}</td>
+                    <td className="row-actions">{!readOnly && <button className="ghost-btn small" type="button" disabled={busy} onClick={() => onRestore(r)}><RotateCcw size={14} /> Monitor again</button>}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        ) : (
-          <div className="chart-empty">Every agent that sent telemetry in this period is connected.</div>
-        )}
-      </Panel>
+        </Panel>
+      )}
     </>
   );
 }
@@ -1400,7 +1400,8 @@ function Library({ library }) {
         <h2>How each status is worked out</h2>
         <p>
           One shared rulebook sits behind every colour on this dashboard. Each metric is compared with fixed limits to give <b>Healthy</b>, <b>Watch</b> or <b>Action required</b>.
-          Health, Risk and Cost each take the worst of their metrics; the overall status takes the worst of the three. Metrics without enough data show <b>No data</b> and are never counted as healthy.
+          Health, Risk and Cost each take the worst of their metrics; the overall status takes the worst of the three. Metrics with too little activity still show their
+          figures but are marked <b>No data</b> and never counted as healthy.
         </p>
         <p className="muted">{counts.live || 0} metrics measured today · {counts.conditional || 0} when their source is connected · {counts['not-available'] || 0} defined and waiting for a data source.</p>
       </section>
@@ -1428,7 +1429,7 @@ function Library({ library }) {
           </table>
         </div>
       </Panel>
-      <Panel title="AI policy checks" subtitle="Drive the “Out of AI policy” figure. Evaluated automatically from the agent profile.">
+      <Panel title="AI policy checks" subtitle="Drive the “Out of AI policy” figure. Evaluated automatically from the agent details.">
         <table className="table">
           <thead><tr><th scope="col">Check</th><th scope="col">Rule</th></tr></thead>
           <tbody>{library.compliance.map((c) => <tr key={c.id}><td><b>{c.name}</b></td><td>{c.definition}</td></tr>)}</tbody>
@@ -1439,17 +1440,20 @@ function Library({ library }) {
 }
 
 /* =============================================================== data sources */
-function DataSources({ payload, agents, discovered, mode }) {
+function DataSources({ payload, agents, removed, mode }) {
   const s = payload?.sources || {};
   const rows = [
     ['Data as of', fmtDateTime(payload?.generatedAt)],
     ['Data mode', mode === 'live' ? 'Live telemetry' : mode === 'demo' ? 'Demo data (synthetic, not live)' : 'Unavailable'],
     ['Reporting period', payload?.window ? `${fmtDateTime(payload.window.start)} → ${fmtDateTime(payload.window.end)}` : '—'],
+    ['Agents found from', `Telemetry in the last ${payload?.extendedDays || 90} days`],
     ['Telemetry source', s.telemetry || '—'],
-    ['Connected-agents list', s.registry?.label || '—'],
-    ['Connected agents', fmtNum(agents.length)],
-    ['…with activity in period', fmtNum(agents.filter((a) => a.allConversations > 0).length)],
-    ['Sending telemetry, not connected', fmtNum(discovered.length)],
+    ['Agents monitored', fmtNum(agents.length)],
+    ['…active in the period', fmtNum(agents.filter((a) => !a.widened && a.volume > 0).length)],
+    ['…shown from last 90 days', fmtNum(agents.filter((a) => a.widened).length)],
+    ['Not monitored (removed)', fmtNum(removed.length)],
+    ['Agent details stored in', s.registry?.label || '—'],
+    ['Agents with saved details', fmtNum(s.savedProfiles ?? 0)],
     ['AI inventory (optional)', s.inventoryLabel || '—'],
     ['Token telemetry (Foundry)', s.costTelemetry || '—'],
     ['Pricing', s.pricing || '—'],
@@ -1460,7 +1464,7 @@ function DataSources({ payload, agents, discovered, mode }) {
     <div className="checks-grid">
       <Panel title="What was loaded" subtitle="Sources and counts behind every page.">
         {s.registry?.warning && <div className="warn"><AlertTriangle size={15} /> {s.registry.warning}</div>}
-        {s.inventory === 'error' && <div className="warn"><AlertTriangle size={15} /> The optional AI inventory could not be loaded ({s.inventoryLabel}). Profiles come from the connected-agents list only.</div>}
+        {s.inventory === 'error' && <div className="warn"><AlertTriangle size={15} /> The optional AI inventory could not be loaded ({s.inventoryLabel}).</div>}
         <dl className="kv">{rows.map(([k, v]) => (<React.Fragment key={k}><dt>{k}</dt><dd>{v}</dd></React.Fragment>))}</dl>
         {s.aliasClashes?.length > 0 && (
           <>
@@ -1471,13 +1475,13 @@ function DataSources({ payload, agents, discovered, mode }) {
       </Panel>
       <Panel title="How the figures are built" subtitle="Method notes for executive reporting." helpSection="data">
         <div className="method">
-          <p><b>Which agents.</b> Only agents on the connected-agents list (Manage agents) are monitored and counted. Agents that send telemetry but are not connected are listed separately and never mixed into the figures.</p>
-          <p><b>Agent identity.</b> Every conversation is assigned to exactly one agent: the topic schema name (stable across renames), else the bot name. All names of a connected agent (ID, display name, aliases) map to that one agent.</p>
-          <p><b>Conversations.</b> Only engaged conversations count — a user sent at least one message. Channel events such as “conversation started” are not counted as user messages.</p>
-          <p><b>Statuses.</b> Each metric is rated against the limits in the metric library. Health, Risk and Cost take their worst metric; the overall status takes the worst of the three. Metrics without enough data are “No data” and never count as healthy.</p>
-          <p><b>Risk.</b> Responsible AI blocks read from error sub-codes: jailbreaks, attacks in documents, harmful content and DLP blocks. They are excluded from Health errors so nothing is counted twice.</p>
-          <p><b>Cost.</b> Copilot Studio: answered messages × credits per response × price per credit (an estimate; the billed figure is in the Power Platform admin center). Foundry: tokens × model price. Cost is only rated when a monthly budget is set.</p>
-          <p><b>Freshness.</b> Application Insights usually lags a few minutes. All queries use the same fixed time window.</p>
+          <p><b>Which agents.</b> Every agent that sent telemetry in the last 90 days is monitored automatically. Agents you stop monitoring are listed separately and can be restored.</p>
+          <p><b>Quiet agents.</b> If an agent had no activity in the selected period, its figures use its most recent 90 days instead and are labelled “Last 90 days”. Portfolio totals on the Overview only include agents active in the selected period.</p>
+          <p><b>Agent identity.</b> Every conversation is assigned to exactly one agent by its topic schema name (stable across renames), else its bot name.</p>
+          <p><b>Runs.</b> Chat conversations where a user sent a message, plus automatic runs started by a trigger or schedule. Greeting-only sessions are not counted.</p>
+          <p><b>Statuses.</b> Each metric is rated against the limits in the metric library. Health, Risk and Cost take their worst metric; the overall status takes the worst of the three. With too little activity, figures are still shown but the status is “No data”.</p>
+          <p><b>Risk.</b> Responsible AI blocks read from error sub-codes: jailbreaks, attacks in documents, harmful content and DLP blocks.</p>
+          <p><b>Cost.</b> Copilot Studio: (chat replies + automatic runs) × credits per response × price per credit — an estimate; the billed figure is in the Power Platform admin center. Foundry: tokens × model price. Cost is rated only when a monthly budget is set.</p>
         </div>
       </Panel>
     </div>
@@ -1491,13 +1495,9 @@ function readHash() {
 }
 
 async function api(url, options = {}) {
-  const res = await fetch(url, { cache: 'no-store', credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  const res = await fetch(url, { cache: 'no-store', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
   const body = await res.json().catch(() => null);
-  if (!res.ok) {
-    const err = new Error(body?.message || `The service returned ${res.status}`);
-    err.status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw new Error(body?.message || `The service returned ${res.status}`);
   return body;
 }
 
@@ -1517,11 +1517,9 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [helpSection, setHelpSection] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('agent-theme') || 'light');
-  const [form, setForm] = useState(null); // { mode: 'create'|'edit', initial }
+  const [form, setForm] = useState(null);
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [user, setUser] = useState(null);
-  const [authEnabled, setAuthEnabled] = useState(false);
   const reqId = useRef(0);
   const abortRef = useRef(null);
   const hasData = useRef(false);
@@ -1530,18 +1528,6 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('agent-theme', theme);
   }, [theme]);
-
-  // Static Web Apps sign-in state (silently ignored when not hosted on SWA).
-  useEffect(() => {
-    fetch('/.auth/me', { credentials: 'same-origin' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((b) => {
-        if (!b || !('clientPrincipal' in b)) return;
-        setAuthEnabled(true);
-        setUser(b.clientPrincipal?.userDetails || null);
-      })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1571,7 +1557,6 @@ function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  /** Only the newest request may update the screen; older ones are aborted or ignored. */
   const load = useCallback(async (d, { fresh = false } = {}) => {
     const id = ++reqId.current;
     abortRef.current?.abort();
@@ -1632,27 +1617,24 @@ function App() {
   }, [autoRefresh, days, source, load]);
 
   const agents = payload?.agents || [];
-  const discovered = payload?.discovered || [];
+  const removed = payload?.removed || [];
   const library = payload?.library;
-  const signInNeeded = mode === 'live' && payload?.changesRequireSignIn !== false && !user;
-  const canEdit = mode === 'live' && !signInNeeded;
+  const canEdit = mode === 'live';
 
   const kpis = useMemo(() => {
     const notYet = new Set((library?.metrics || []).filter((m) => m.availability === 'not-available').map((m) => m.id));
-    const applicable = agents
-      .filter((a) => a.allConversations > 0)
-      .flatMap((a) => [...a.metrics.health, ...a.metrics.risk, ...a.metrics.cost])
-      .filter((m) => !m.informational && !notYet.has(m.id));
+    const activeAgents = agents.filter((a) => !a.widened && a.volume > 0);
+    const applicable = activeAgents.flatMap((a) => [...a.metrics.health, ...a.metrics.risk, ...a.metrics.cost]).filter((m) => !m.informational && !notYet.has(m.id));
     return {
-      connected: agents.length,
-      active: agents.filter((a) => a.allConversations > 0).length,
-      conversations: sum(agents, (a) => a.volume),
+      monitored: agents.length,
+      active: activeAgents.length,
+      runs: sum(activeAgents, (a) => a.volume),
       attention: agents.filter((a) => ['red', 'amber'].includes(a.statuses.overall)).length,
       nonCompliant: agents.filter((a) => !a.compliant).length,
-      discovered: discovered.length,
+      widened: agents.filter((a) => a.widened).length,
       coverage: applicable.length ? Math.round((100 * applicable.filter((m) => m.status !== 'unknown').length) / applicable.length) : 0,
     };
-  }, [agents, discovered, library]);
+  }, [agents, library]);
 
   const selectedAgent = selected ? agents.find((a) => a.id === selected.id) : null;
   const departments = useMemo(() => [...new Set(agents.map((a) => a.department).filter((d) => d && d !== 'Unassigned'))].sort(), [agents]);
@@ -1675,60 +1657,45 @@ function App() {
   };
   const refresh = () => (source === 'demo' ? loadDemo(days) : load(days, { fresh: true }));
 
-  // ------------------------------------------------------------- registry actions
-  const handleAuthError = (e) => {
-    if (e.status === 401) setUser(null);
-    throw e;
+  // --------------------------------------------------------- agent settings actions
+  const run = async (fn, okText) => {
+    setBusy(true);
+    try {
+      await fn();
+      setToast({ kind: 'ok', text: okText });
+      await load(days, { fresh: true });
+    } catch (e) {
+      setToast({ kind: 'error', text: e.message });
+    } finally {
+      setBusy(false);
+    }
   };
   const saveAgent = async (values) => {
-    const update = form?.mode === 'edit';
-    await api('/api/registry', { method: 'POST', body: JSON.stringify({ agent: values, update }) }).catch(handleAuthError);
+    await api('/api/registry', { method: 'POST', body: JSON.stringify({ agent: values }) });
     setForm(null);
-    setToast({ kind: 'ok', text: update ? `Saved changes to ${values.displayName || values.id}.` : `${values.displayName || values.id} is now connected.` });
+    setToast({ kind: 'ok', text: `Saved details for ${values.displayName || values.id}.` });
     await load(days, { fresh: true });
   };
-  const connectMany = async (list) => {
-    if (!window.confirm(`Connect all ${list.length} agents? You can add their owners, department and budget afterwards.`)) return;
-    setBusy(true);
-    try {
-      await api('/api/registry', { method: 'POST', body: JSON.stringify({ agents: list.map((d) => ({ ...d.suggestion, id: d.id })) }) }).catch(handleAuthError);
-      setToast({ kind: 'ok', text: `${list.length} agents connected.` });
-      await load(days, { fresh: true });
-    } catch (e) {
-      setToast({ kind: 'error', text: e.message });
-    } finally {
-      setBusy(false);
-    }
+  const removeAgent = (agent) => {
+    if (!window.confirm(`Stop monitoring “${agent.name}”?\n\nIt will no longer be shown or counted. Its telemetry is kept, and you can monitor it again from Manage agents.`)) return;
+    if (selected?.id === agent.id) setSelected(null);
+    run(() => api(`/api/registry?id=${encodeURIComponent(agent.id)}`, { method: 'DELETE' }), `${agent.name} is no longer monitored.`);
   };
-  const disconnectAgent = async (agent) => {
-    if (!window.confirm(`Disconnect “${agent.name}”?\n\nIt will no longer be monitored or counted. Its telemetry is not deleted, and you can connect it again at any time.`)) return;
-    setBusy(true);
-    try {
-      await api(`/api/registry?id=${encodeURIComponent(agent.id)}`, { method: 'DELETE' }).catch(handleAuthError);
-      setToast({ kind: 'ok', text: `${agent.name} was disconnected.` });
-      if (selected?.id === agent.id) setSelected(null);
-      await load(days, { fresh: true });
-    } catch (e) {
-      setToast({ kind: 'error', text: e.message });
-    } finally {
-      setBusy(false);
-    }
-  };
-  const editAgent = (agent) => setForm({ mode: 'edit', initial: { ...agent.profile, id: agent.id } });
-  const connectAgent = (initialValues) => setForm({ mode: 'create', initial: initialValues || EMPTY_PROFILE });
+  const restoreAgent = (r) => run(() => api('/api/registry', { method: 'POST', body: JSON.stringify({ restore: r.id }) }), `${r.name} is monitored again.`);
+  const editAgent = (agent) => setForm({ mode: 'edit', initial: { ...agent.profile, id: agent.id, displayName: agent.profile.displayName || agent.name } });
+  const addAgent = () => setForm({ mode: 'create', initial: EMPTY_PROFILE });
 
   return (
     <AppContext.Provider value={{ openHelp: setHelpSection }}>
       <a className="skip" href="#main">Skip to content</a>
       <Header payload={payload} mode={mode} theme={theme} toggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} refresh={refresh} refreshing={refreshing}
-        openHelp={setHelpSection} days={days} setDays={setDays} autoRefresh={autoRefresh && source === 'live'} setAutoRefresh={setAutoRefresh} stale={stale} user={user} authEnabled={authEnabled} />
+        openHelp={setHelpSection} days={days} setDays={setDays} autoRefresh={autoRefresh && source === 'live'} setAutoRefresh={setAutoRefresh} stale={stale} />
       <nav className="tabs" aria-label="Pages">
         <div className="tabs-inner">
           {TABS.map((t) => (
             <button key={t.id} type="button" aria-current={tab === t.id && !selected ? 'page' : undefined} className={tab === t.id && !selected ? 'active' : ''}
               onClick={() => { setTab(t.id); setSelected(null); }}>
               {t.label}
-              {t.id === 'manage' && discovered.length > 0 && mode === 'live' && <span className="tab-count" title={`${discovered.length} not connected`}>{discovered.length}</span>}
             </button>
           ))}
         </div>
@@ -1738,47 +1705,43 @@ function App() {
           <div className="banner error" role="alert">
             <AlertTriangle size={18} />
             <span><b>Live telemetry could not be retrieved.</b> No figures are shown rather than old or sample data. {error && <span className="muted">({error})</span>}</span>
-            <button className="ghost small" type="button" onClick={() => load(days, { fresh: true })}>Try again</button>
-            <button className="ghost small" type="button" onClick={() => setSource('demo')}>Show demo data</button>
+            <button className="ghost-btn small" type="button" onClick={() => load(days, { fresh: true })}>Try again</button>
+            <button className="ghost-btn small" type="button" onClick={() => setSource('demo')}>Show demo data</button>
           </div>
         )}
         {stale && mode === 'live' && (
           <div className="banner warn" role="status">
             <AlertTriangle size={16} /> The automatic refresh at {fmtDateTime(stale)} failed. Figures shown are from {fmtDateTime(payload?.generatedAt)}.
-            <button className="ghost small" type="button" onClick={() => load(days, { fresh: true })}>Try again</button>
+            <button className="ghost-btn small" type="button" onClick={() => load(days, { fresh: true })}>Try again</button>
           </div>
         )}
         {mode === 'demo' && (
           <div className="banner demo" role="status">
             <Info size={16} /> <span><b>Demo data</b> — a synthetic portfolio for presentations. Not live telemetry.</span>
-            <button className="ghost small" type="button" onClick={() => setSource('live')}>Switch to live data</button>
+            <button className="ghost-btn small" type="button" onClick={() => setSource('live')}>Switch to live data</button>
           </div>
-        )}
-        {mode === 'live' && payload?.sources?.registry?.warning && tab !== 'manage' && (
-          <div className="banner warn" role="status"><AlertTriangle size={16} /> {payload.sources.registry.warning}</div>
         )}
         {mode === 'loading' && !payload && <div className="chart-empty">Loading telemetry…</div>}
         {payload && selected && !selectedAgent && (
           <Panel title="Agent not found">
-            <p className="muted">“{selected.id}” is not a connected agent. It may have been disconnected.</p>
-            <button className="ghost small" type="button" onClick={() => setSelected(null)}><ArrowLeft size={14} /> Back</button>
+            <p className="muted">“{selected.id}” is not monitored. It may have been removed, or it has not sent telemetry in the last 90 days.</p>
+            <button className="ghost-btn small" type="button" onClick={() => setSelected(null)}><ArrowLeft size={14} /> Back</button>
           </Panel>
         )}
         {payload &&
           (selectedAgent ? (
-            <AgentDetail agent={selectedAgent} pillar={selected.pillar} setPillar={(p) => setSelected((s) => ({ ...s, pillar: p }))} back={() => setSelected(null)} days={days} library={library}
-              canEdit={canEdit} onEdit={editAgent} onDisconnect={disconnectAgent} />
+            <AgentDetail agent={selectedAgent} pillar={selected.pillar} setPillar={(p) => setSelected((s) => ({ ...s, pillar: p }))} back={() => setSelected(null)} library={library}
+              canEdit={canEdit} onEdit={editAgent} onRemove={removeAgent} />
           ) : selected ? null : tab === 'overview' ? (
-            <Overview agents={agents} discovered={discovered} days={days} library={library} kpis={kpis} goAgents={goAgents} goManage={goManage} openAgent={openAgent} mode={mode} />
+            <Overview agents={agents} removed={removed} days={days} library={library} kpis={kpis} goAgents={goAgents} goManage={goManage} openAgent={openAgent} />
           ) : tab === 'agents' ? (
             <Agents agents={agents} filters={filters} setFilters={setFilters} groupBy={groupBy} setGroupBy={setGroupBy} openAgent={openAgent} goManage={goManage} />
           ) : tab === 'manage' ? (
-            <Manage agents={agents} discovered={discovered} payload={payload} mode={mode} canEdit={canEdit} signInNeeded={signInNeeded} onConnect={connectAgent} onConnectMany={connectMany}
-              onEdit={editAgent} onDisconnect={disconnectAgent} openAgent={openAgent} busy={busy} days={days} />
+            <Manage agents={agents} removed={removed} payload={payload} mode={mode} onAdd={addAgent} onEdit={editAgent} onRemove={removeAgent} onRestore={restoreAgent} openAgent={openAgent} busy={busy} />
           ) : tab === 'library' ? (
             <Library library={library} />
           ) : (
-            <DataSources payload={payload} agents={agents} discovered={discovered} mode={mode} />
+            <DataSources payload={payload} agents={agents} removed={removed} mode={mode} />
           ))}
       </main>
       {form && <AgentForm initial={form.initial} mode={form.mode} onCancel={() => setForm(null)} onSave={saveAgent} departments={departments} />}
@@ -1788,7 +1751,7 @@ function App() {
           <button type="button" className="icon" onClick={() => setToast(null)} aria-label="Dismiss"><X size={14} /></button>
         </div>
       )}
-      {helpSection && <Help close={() => setHelpSection(null)} library={library} kpiDefs={KPI_DEFS} initialSection={helpSection} sources={payload?.sources} mode={mode} />}
+      {helpSection && <Help close={() => setHelpSection(null)} library={library} initialSection={helpSection} sources={payload?.sources} mode={mode} />}
     </AppContext.Provider>
   );
 }

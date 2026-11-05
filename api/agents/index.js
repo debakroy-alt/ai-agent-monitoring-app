@@ -1,27 +1,26 @@
 /**
  * GET /api/agents?days=7[&fresh=1]
  *
- * Reads Copilot Studio (and Foundry / OpenTelemetry) runtime telemetry from
- * Log Analytics (workspace-based Application Insights) and returns:
- *   agents     – CONNECTED agents only (from the registry), measured against the metrics library
- *   discovered – agents that sent telemetry in the period but are not connected
+ * Every agent that sends telemetry to Application Insights is monitored
+ * automatically — nothing has to be "connected" first.
+ *
+ *   - Agents are found in the extended window (EXTENDED_LOOKBACK_DAYS, default 90 days),
+ *     so an agent never disappears just because it was quiet in the selected period.
+ *   - Figures use the selected period. If an agent had no activity in that period, its
+ *     figures fall back to the extended window and are labelled as such (widened: true).
+ *   - Saved profiles (name, department, owners, budget…) are optional and only add context.
+ *   - Agents the user removed are listed separately (removed) and can be restored.
  *
  * Everything returned is live. No demo or template data is ever mixed in.
- *
- * Identity stability:
- *   - Each conversation is mapped to ONE agent deterministically (sorted sets, no take_any).
- *   - Every name of a connected agent (id, display name, aliases) is mapped to its id inside KQL,
- *     so all queries agree on the same agent.
- *   - All queries share one fixed [start, end] window.
- *   - Results are sorted deterministically.
  */
 const { DefaultAzureCredential } = require('@azure/identity');
 const { publicLibrary } = require('../shared/metrics-registry');
-const { loadInventory, matchInventory, buildAliasMap, mergeProfile } = require('../shared/inventory');
+const { loadInventory, matchInventory, buildAliasMap, mergeProfile, normalise } = require('../shared/inventory');
 const { loadRegistry } = require('../shared/registry');
-const { buildAgent, buildDiscovered, fillSeries, sortAgents, DEFAULT_CONFIG } = require('../shared/build-agent');
+const { buildAgent, fillSeries, sortAgents, prettyName, DEFAULT_CONFIG } = require('../shared/build-agent');
 
 const ALLOWED_DAYS = [1, 7, 30, 90];
+const EXTENDED_DAYS = Math.max(90, Number(process.env.EXTENDED_LOOKBACK_DAYS || 90));
 const CACHE_MS = Number(process.env.CACHE_SECONDS || 60) * 1000;
 
 function readConfig() {
@@ -43,7 +42,7 @@ function readConfig() {
 }
 
 const credential = new DefaultAzureCredential();
-const cache = new Map(); // `${days}|${registryEtag}` -> { at, body }
+const cache = new Map();
 
 // ------------------------------------------------------------------ KQL
 const kqlString = (s) => `'${String(s).replace(/[\r\n\t]/g, ' ').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
@@ -53,7 +52,6 @@ function aliasTable(aliasMap) {
   return `datatable(AliasKey:string, Canonical:string)[${rows.join(',\n  ')}]`;
 }
 
-// Error codes from the Copilot Studio error-code reference.
 const CODES = {
   jailbreak: ['openaijailbreak', 'jailbreak'],
   indirect: ['openaindirectattack', 'openaiindirectattack'],
@@ -70,15 +68,11 @@ const CODES = {
 const dyn = (list) => `dynamic([${list.map((c) => `"${c}"`).join(', ')}])`;
 
 /**
- * Shared prelude. Resolves every conversation to exactly one agent:
- *   1. topic schema prefix (stable, survives renames), else
- *   2. the bot name, mapped to the schema seen with that name elsewhere, else
- *   3. the bot name itself;
- * then maps that name (or the bot name) to a connected agent's id.
- *
- * Only "message" activities count as user messages / replies. Channel events
- * (conversationUpdate, startConversation, typing…) are ignored, otherwise they
- * show up as unanswered user messages and drag availability down.
+ * Shared prelude. Resolves every conversation to exactly one agent, then classifies it:
+ *   - chat conversation: the user sent at least one "message" activity
+ *   - automatic run:     no user message, but the agent was triggered (event/invoke activity)
+ *                        or ran a real topic / hit an error (e.g. scheduled or event-triggered agents)
+ *   - greeting only:     neither of the above (not counted as activity)
  */
 const prelude = (w) => String.raw`
 let StartTime = datetime(${w.start});
@@ -98,7 +92,10 @@ let Base = AppEvents
     | where isnotempty(ConversationId)
     | extend IsMessage = isempty(ActivityType) or ActivityType == "message"
     | extend IsUserMsg = Name == "BotMessageReceived" and IsMessage,
-             IsBotMsg  = Name == "BotMessageSend" and IsMessage;
+             IsBotMsg  = Name == "BotMessageSend" and IsMessage,
+             IsTrigger = Name == "BotMessageReceived" and ActivityType in ("event", "invoke"),
+             IsRealTopic = isnotempty(TopicId)
+                 and not(TopicId has "ConversationStart" or TopicId has "Greeting" or TopicName in~ ("Conversation Start", "ConversationStart", "Greeting"));
 let ConvKeys = Base
     | extend Schema = extract(@"^(.+?)\.topic\.", 1, TopicId),
              BotName = case(Name == "BotMessageReceived", RecipientName, Name == "BotMessageSend", FromName, "")
@@ -136,6 +133,8 @@ let Conv = Events
     | summarize
         UserMsgs = countif(IsUserMsg),
         BotMsgs = countif(IsBotMsg),
+        Triggers = countif(IsTrigger),
+        RealTopics = countif(IsRealTopic),
         HealthErrors = countif(Name == "OnErrorLog" and not(IsSafety)),
         DepErrors = countif(Name == "OnErrorLog" and IsDep),
         Jail = countif(IsJail), Indirect = countif(IsIndirect), Harm = countif(IsHarm), Dlp = countif(IsDlp),
@@ -145,7 +144,11 @@ let Conv = Events
         Channel = take_anyif(ChannelId, isnotempty(ChannelId)),
         First = min(TimeGenerated), Last = max(TimeGenerated)
         by AgentId, ConversationId, RawKey, ConvBotName
-    | extend Safety = Jail + Indirect + Harm + Dlp;
+    | extend Safety = Jail + Indirect + Harm + Dlp
+    | extend IsChat = UserMsgs > 0
+    | extend IsAuto = not(IsChat) and (Triggers > 0 or RealTopics > 0 or Errors > 0)
+    | extend IsRun = IsChat or IsAuto
+    | extend IsResolved = IsRun and HealthErrors == 0 and Esc == 0 and Safety == 0 and (BotMsgs > 0 or not(IsChat));
 `;
 
 const QUERIES = {
@@ -153,13 +156,14 @@ const QUERIES = {
 Conv
 | summarize
     Conversations = count(),
-    Engaged = countif(UserMsgs > 0),
-    Resolved = countif(UserMsgs > 0 and BotMsgs > 0 and HealthErrors == 0 and Esc == 0 and Safety == 0),
-    HealthFailed = countif(UserMsgs > 0 and HealthErrors > 0),
-    DependencyFailed = countif(UserMsgs > 0 and DepErrors > 0),
-    Escalated = countif(UserMsgs > 0 and Esc > 0),
+    Engaged = countif(IsRun),
+    AutoRuns = countif(IsAuto),
+    Resolved = countif(IsResolved),
+    HealthFailed = countif(IsRun and HealthErrors > 0),
+    DependencyFailed = countif(IsRun and DepErrors > 0),
+    Escalated = countif(IsRun and Esc > 0),
     Jailbreaks = sum(Jail), IndirectAttacks = sum(Indirect), DlpBlocks = sum(Dlp),
-    HarmfulConversations = countif(UserMsgs > 0 and Harm > 0),
+    HarmfulConversations = countif(IsRun and Harm > 0),
     ErrorEvents = sum(Errors),
     ProductionConversations = countif(TestEvents == 0),
     TestConversations = countif(TestEvents > 0),
@@ -170,12 +174,12 @@ Conv
     by AgentId`,
   series: (w) => prelude(w) + String.raw`
 Conv
-| where UserMsgs > 0
+| where IsRun
 | summarize
     Conversations = count(),
     Failed = countif(HealthErrors > 0),
     Blocked = countif(Safety > 0),
-    Completed = countif(BotMsgs > 0 and HealthErrors == 0 and Esc == 0 and Safety == 0)
+    Completed = countif(IsResolved)
     by AgentId, Bucket = bin(First, ${w.days === 1 ? '1h' : '1d'})
 | order by AgentId asc, Bucket asc`,
   turns: (w) => prelude(w) + String.raw`
@@ -200,7 +204,6 @@ Events
 | extend ErrorCode = tostring(Properties["ErrorCodeText"])
 | where isnotempty(ErrorCode)
 | summarize Count = count() by AgentId, ErrorCode`,
-  // Only returns rows for agents instrumented with OpenTelemetry gen_ai.* (e.g. Foundry).
   cost: (w) => String.raw`
 let StartTime = datetime(${w.start});
 let EndTime = datetime(${w.end});
@@ -220,10 +223,7 @@ union isfuzzy=true
     by AgentId, Model`,
 };
 
-/**
- * The Log Analytics REST API returns `dynamic` columns (Channels, BotNames, RawKeys)
- * as JSON text. Convert them back to arrays.
- */
+/** Log Analytics returns `dynamic` columns (arrays) as JSON text. */
 function parseCell(value, type) {
   if (type !== 'dynamic' || typeof value !== 'string') return value;
   try {
@@ -266,6 +266,34 @@ const byAgent = (rows) => Object.fromEntries(rows.map((r) => [r.AgentId, r]));
 const asArray = (v) => (Array.isArray(v) ? v : v === null || v === undefined || v === '' ? [] : [v]);
 const lower = (s) => String(s || '').toLowerCase();
 
+/** Runs the full query set for one time window and indexes the results by agent. */
+async function queryWindow(workspaceId, token, w) {
+  const q = (name) => runQuery(workspaceId, token, QUERIES[name](w), `${name}${w.days === EXTENDED_DAYS && w.extended ? ` (${EXTENDED_DAYS} days)` : ''}`);
+  const soft = (p) => p.then((rows) => ({ ok: true, rows }), (e) => ({ ok: false, rows: [], error: e.message }));
+  const [summary, turns, series, errors, cost] = await Promise.all([q('summary'), q('turns'), q('series'), soft(q('errors')), soft(q('cost'))]);
+  const errorsBy = groupBy(errors.rows);
+  const summaryBy = byAgent(summary);
+  const rowFor = (key) => {
+    const row = { ...(summaryBy[key] || { AgentId: key }) };
+    for (const col of ['Channels', 'BotNames', 'RawKeys']) row[col] = asArray(row[col]);
+    row.TopErrorCodes = (errorsBy[key] || [])
+      .sort((a, b) => b.Count - a.Count || String(a.ErrorCode).localeCompare(String(b.ErrorCode)))
+      .slice(0, 6)
+      .map((e) => ({ code: e.ErrorCode, count: Number(e.Count) }));
+    return row;
+  };
+  return {
+    w,
+    keys: new Set([...summary.map((r) => r.AgentId), ...cost.rows.map((r) => r.AgentId)].filter(Boolean)),
+    has: (key) => !!summaryBy[key] || cost.rows.some((r) => r.AgentId === key),
+    rowFor,
+    turnsBy: byAgent(turns),
+    seriesBy: groupBy(series),
+    costBy: groupBy(cost.rows),
+    costOk: cost.ok,
+  };
+}
+
 async function buildPayload(days, registry) {
   const started = Date.now();
   const workspaceId = process.env.LOG_ANALYTICS_WORKSPACE_ID;
@@ -273,19 +301,20 @@ async function buildPayload(days, registry) {
   const config = readConfig();
 
   const inventory = await loadInventory(credential).catch((e) => ({ source: 'error', sourceLabel: e.message, records: [] }));
-  const profiles = registry.agents.map((r) => mergeProfile(r, matchInventory(inventory.records, r.id)));
-  const connectedKeys = new Set(profiles.map((p) => lower(p.key)));
-  // Connected agents first so their names always win; inventory records only help group discovered agents.
-  const { map: aliasMap, clashes } = buildAliasMap([...profiles, ...inventory.records.filter((r) => !connectedKeys.has(lower(r.key)))]);
+  const saved = registry.agents.map((r) => normalise(r));
+  // Saved profiles first so their names always win; inventory only helps group names.
+  const { map: aliasMap, clashes } = buildAliasMap([...saved, ...inventory.records]);
+  const alias = aliasTable(aliasMap);
 
   const endMs = Math.floor(Date.now() / 60000) * 60000;
-  const w = {
-    days,
-    start: new Date(endMs - days * 86400000).toISOString(),
+  const mkWindow = (d, extended = false) => ({
+    days: d,
+    extended,
+    start: new Date(endMs - d * 86400000).toISOString(),
     end: new Date(endMs).toISOString(),
-    alias: aliasTable(aliasMap),
+    alias,
     slow: config.slowReplySeconds,
-  };
+  });
 
   let token;
   try {
@@ -293,73 +322,75 @@ async function buildPayload(days, registry) {
   } catch (e) {
     throw stageError('sign-in to Log Analytics', e.message);
   }
-  const q = (name) => runQuery(workspaceId, token, QUERIES[name](w), name);
-  const soft = (p) => p.then((rows) => ({ ok: true, rows }), (e) => ({ ok: false, rows: [], error: e.message }));
-  const [summary, turns, series, errors, costResult] = await Promise.all([q('summary'), q('turns'), q('series'), soft(q('errors')), soft(q('cost'))]);
+
+  const needExtended = days < EXTENDED_DAYS;
+  const [period, extended] = await Promise.all([
+    queryWindow(workspaceId, token, mkWindow(days)),
+    needExtended ? queryWindow(workspaceId, token, mkWindow(EXTENDED_DAYS, true)) : null,
+  ]);
+  const wide = extended || period;
 
   try {
-    const turnsBy = byAgent(turns);
-    const seriesBy = groupBy(series);
-    const errorsBy = groupBy(errors.rows);
-    const costBy = groupBy(costResult.rows);
-    const summaryBy = byAgent(summary);
-    const rowFor = (key) => {
-      const row = { ...(summaryBy[key] || { AgentId: key }) };
-      for (const col of ['Channels', 'BotNames', 'RawKeys']) row[col] = asArray(row[col]);
-      row.TopErrorCodes = (errorsBy[key] || [])
-        .sort((a, b) => b.Count - a.Count || String(a.ErrorCode).localeCompare(String(b.ErrorCode)))
-        .slice(0, 6)
-        .map((e) => ({ code: e.ErrorCode, count: Number(e.Count) }));
-      return row;
-    };
+    // Every agent seen in telemetry (extended window) + agents with a saved profile.
+    const allKeys = new Map(); // lower -> key
+    for (const k of [...wide.keys, ...period.keys]) if (!allKeys.has(lower(k))) allKeys.set(lower(k), k);
+    for (const s of saved) if (!allKeys.has(lower(s.key))) allKeys.set(lower(s.key), s.key);
+    const removedSet = new Set(registry.removed.map(lower));
 
-    // Connected agents — always all of them, even with no activity in the period.
-    const telemetryKeys = new Set([...summary.map((r) => r.AgentId), ...Object.keys(costBy)].filter(Boolean));
-    const keyFor = (profile) => [...telemetryKeys].find((k) => lower(k) === lower(profile.key)) || profile.key;
-    const agents = profiles.map((profile) => {
-      const key = keyFor(profile);
+    const build = (key) => {
+      const profile = mergeProfile(registry.agents.find((a) => lower(a.id) === lower(key)), matchInventory(inventory.records, key));
+      const usePeriod = period.has(key) && Number(period.rowFor(key).Conversations || 0) > 0;
+      const src = usePeriod || !extended || !extended.has(key) ? period : extended;
       return buildAgent({
-        key: profile.key,
-        row: rowFor(key),
-        turns: turnsBy[key],
-        series: fillSeries(seriesBy[key] || [], w.start, w.end, days),
-        costRows: costBy[key] || [],
+        key,
+        row: src.rowFor(key),
+        turns: src.turnsBy[key],
+        series: fillSeries(src.seriesBy[key] || [], src.w.start, src.w.end, src.w.days),
+        costRows: src.costBy[key] || [],
         profile,
-        days,
+        days: src.w.days,
+        selectedDays: days,
         now: endMs,
         config,
       });
-    });
+    };
 
-    // Discovered — sending telemetry but not connected.
-    const discovered = [...telemetryKeys]
-      .filter((k) => !connectedKeys.has(lower(k)))
-      .map((key) => buildDiscovered({ key, row: rowFor(key), suggestion: matchInventory(inventory.records, key) || null }))
-      .sort((a, b) => b.conversations - a.conversations || a.name.localeCompare(b.name));
+    const agents = [];
+    const removed = [];
+    for (const key of allKeys.values()) {
+      if (removedSet.has(lower(key))) {
+        const row = wide.has(key) ? wide.rowFor(key) : {};
+        const prof = registry.agents.find((a) => lower(a.id) === lower(key));
+        removed.push({ id: key, name: prof?.displayName || asArray(row.BotNames).find((n) => lower(n) !== lower(key)) || prettyName(key), lastSeen: row.LastSeen || null, runs: Number(row.Engaged || 0) });
+      } else {
+        agents.push(build(key));
+      }
+    }
+    removed.sort((a, b) => a.name.localeCompare(b.name));
 
     return {
       mode: 'live',
       lookbackDays: days,
-      window: { start: w.start, end: w.end },
+      extendedDays: EXTENDED_DAYS,
+      window: { start: period.w.start, end: period.w.end },
       generatedAt: new Date(endMs).toISOString(),
       queryMs: Date.now() - started,
       sources: {
         telemetry: 'Application Insights (Log Analytics workspace)',
         registry: registry.storage,
         registryUpdatedAt: registry.updatedAt,
-        connectedCount: registry.agents.length,
+        savedProfiles: registry.agents.length,
         inventory: inventory.source,
         inventoryLabel: inventory.sourceLabel,
         aliasClashes: clashes,
-        costTelemetry: costResult.ok ? (costResult.rows.length ? 'connected' : 'no gen_ai token data') : 'unavailable',
+        costTelemetry: period.costOk ? (period.costBy && Object.keys(period.costBy).length ? 'connected' : 'no gen_ai token data') : 'unavailable',
         pricing: `Copilot Credits at $${config.creditPriceUsd}/credit · ${process.env.MODEL_PRICES_JSON ? 'custom' : 'default'} model price list`,
         slowReplySeconds: config.slowReplySeconds,
         creditsPerResponse: config.defaultCreditsPerResponse,
       },
-      changesRequireSignIn: process.env.ALLOW_ANONYMOUS_CHANGES !== 'true',
       library: publicLibrary(),
       agents: sortAgents(agents),
-      discovered,
+      removed,
     };
   } catch (e) {
     throw e.stage ? e : stageError('processing the results', e.message);
@@ -376,7 +407,9 @@ module.exports = async function (context, req) {
     try {
       registry = await loadRegistry(credential);
     } catch (e) {
-      throw stageError('loading connected agents', e.message);
+      // Settings are optional: never block monitoring because they can't be read.
+      context.log.warn?.('Agent settings could not be loaded; continuing without them.', e.message);
+      registry = { agents: [], removed: [], etag: 'unavailable', updatedAt: null, storage: { type: 'error', label: 'Unavailable', warning: `Agent settings could not be loaded (${e.message}). All agents are shown without saved profiles.` } };
     }
     const cacheKey = `${days}|${registry.etag || 'empty'}`;
     const hit = cache.get(cacheKey);

@@ -7,16 +7,16 @@ import { ChevronRight, HelpCircle, Search, X } from 'lucide-react';
  */
 
 const STATUS = [
-  ['green', 'Healthy', 'Every measured check in the area is within its Healthy limit.', 'No action.'],
+  ['green', 'Healthy', 'Every rated check in the area is within its Healthy limit.', 'No action.'],
   ['amber', 'Watch', 'At least one check is in the Watch band and none is at Action.', 'Owner reviews the trend within a working day.'],
   ['red', 'Action required', 'At least one check has passed its Action limit.', 'Owner investigates and fixes.'],
-  ['unknown', 'No data', 'No telemetry, the data source is not connected, or too little activity to judge.', 'Treat as a visibility gap, not a pass.'],
+  ['unknown', 'No data', 'Too little activity to judge, or the data source is not connected. Figures are still shown where they exist.', 'Treat as a visibility gap, not a pass.'],
 ];
 
 const SECTIONS = [
   { id: 'start', title: 'Getting started' },
   { id: 'layout', title: 'Finding your way around' },
-  { id: 'manage', title: 'Connecting and removing agents' },
+  { id: 'manage', title: 'Which agents are shown' },
   { id: 'status', title: 'How statuses work' },
   { id: 'health', title: 'Health metrics' },
   { id: 'risk', title: 'Risk metrics' },
@@ -148,7 +148,7 @@ export default function Help({ close, library, initialSection = 'start', sources
           <label className="help-search">
             <Search size={15} aria-hidden="true" />
             <span className="sr-only">Search the guide</span>
-            <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search the guide (e.g. connect, budget, no data)" />
+            <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search the guide (e.g. budget, no data, quiet)" />
           </label>
           <button className="icon help-close" onClick={close} type="button" aria-label="Close guide"><X size={20} /></button>
         </header>
@@ -166,42 +166,40 @@ export default function Help({ close, library, initialSection = 'start', sources
             <section id="help-start">
               <h3>Getting started</h3>
               <p className="lead">
-                For every connected AI agent, this dashboard answers three questions: is it <b>working</b> (Health), is it <b>behaving safely</b> (Risk) and is it <b>affordable</b> (Cost)?
-                Every colour is calculated automatically from runtime telemetry — nobody types in a status.
+                For every AI agent that sends telemetry, this dashboard answers three questions: is it <b>working</b> (Health), is it <b>behaving safely</b> (Risk) and
+                is it <b>affordable</b> (Cost)? Every colour is calculated automatically from runtime telemetry — nobody types in a status.
               </p>
               <div className="help-steps">
-                <div><span>1</span><p><b>Read the three cards at the top.</b> Health, Risk and Cost each show the headline figure, how many agents are in each status and which agents need attention.</p></div>
-                <div><span>2</span><p><b>Check the overall strip below.</b> The overall status, connected agents, conversations and AI-policy gaps in one line.</p></div>
-                <div><span>3</span><p><b>Select an agent.</b> Any agent named in a card opens straight to the evidence for that area.</p></div>
-                <div><span>4</span><p><b>Read the evidence.</b> Each metric shows its value, its limits, how much data it is based on and where the data comes from.</p></div>
+                <div><span>1</span><p><b>Read the three cards at the top.</b> Health, Risk and Cost each show the headline figure, agents by status and which agents need attention.</p></div>
+                <div><span>2</span><p><b>Check the overall strip below.</b> Overall status, agents monitored, activity and AI-policy gaps in one line.</p></div>
+                <div><span>3</span><p><b>Select an agent.</b> Any agent named in a card or table opens straight to its evidence.</p></div>
+                <div><span>4</span><p><b>Add details.</b> Under Manage agents, give each agent a name, department, owners and budget so policy checks and Cost can be rated.</p></div>
               </div>
-              <p>Hover over any <span className="inline-i">ⓘ</span> icon for a one-line definition, or select <b>Explain</b> next to a panel title.</p>
             </section>
 
             <section id="help-layout">
               <h3>Finding your way around</h3>
               <dl className="help-dl">
-                <dt>Header</dt><dd>Shows <Pill s="green">Live data</Pill> or <Pill s="amber">Demo data</Pill>, when the figures were calculated, sign-in and Refresh.</dd>
-                <dt>Reporting period</dt><dd>Last 24 hours, 7, 30 or 90 days. It applies to every number, status and chart on every page.</dd>
-                <dt>Overview</dt><dd>Health, Risk and Cost cards, the overall status strip, a plain-English summary, trends, status by department and the agents needing action.</dd>
-                <dt>Agents</dt><dd>Every connected agent as a card, grouped and filterable. Select a card for its evidence.</dd>
-                <dt>Manage agents</dt><dd>Connect agents that send telemetry, edit their profile (owners, department, risk tier, budget) and disconnect retired agents.</dd>
+                <dt>Reporting period</dt><dd>Last 24 hours, 7, 30 or 90 days. Agents with no activity in the period show their most recent 90 days instead, labelled “Last 90 days”.</dd>
+                <dt>Overview</dt><dd>Health, Risk and Cost cards, the overall status strip, a plain-English summary, trends, status by department and every agent in one table.</dd>
+                <dt>Agents</dt><dd>Every monitored agent as a card, grouped and filterable.</dd>
+                <dt>Manage agents</dt><dd>Add details to an agent, stop monitoring agents you don’t need (e.g. test agents), or restore them.</dd>
                 <dt>How it’s measured</dt><dd>The full metric library: definitions, formulas, sources, limits and the reasoning behind each limit.</dd>
                 <dt>Data sources</dt><dd>What was loaded and from where. Start here when a number looks wrong.</dd>
               </dl>
             </section>
 
             <section id="help-manage">
-              <h3>Connecting and removing agents</h3>
-              <p className="lead">The dashboard monitors and counts <b>only connected agents</b>, so “Connected agents” is always exactly the list on Manage agents.</p>
+              <h3>Which agents are shown</h3>
+              <p className="lead">Every agent that sent telemetry to Application Insights in the last 90 days is <b>monitored automatically</b>. There is nothing to connect.</p>
               <ul>
-                <li><b>Connect a discovered agent:</b> agents that sent telemetry in the period but are not connected are listed under “Sending telemetry but not connected”. Select <b>Connect</b>, fill in what you know and save. The telemetry ID is filled in for you.</li>
-                <li><b>Connect manually:</b> for an agent that has not sent telemetry yet, enter its Copilot Studio schema name (or bot name) as the telemetry ID. It shows as “No activity” until its first conversation.</li>
-                <li><b>Edit:</b> the pencil icon (or <b>Edit profile</b> on the agent page) updates owners, department, risk tier, approval and budget. These drive the AI policy checks and the Cost rating.</li>
-                <li><b>Disconnect:</b> the bin icon stops monitoring an agent. Telemetry is not deleted and the agent reappears under “not connected” if it is still used.</li>
-                <li>You must be <b>signed in</b> to make changes. Every change records who made it.</li>
+                <li><b>Quiet agents still show data.</b> If an agent had no activity in the selected period, its figures use its most recent 90 days and it carries a “Last 90 days” label.</li>
+                <li><b>Names.</b> Until you add a display name, an agent is shown with a readable version of its schema name (e.g. <code>sps_dailyCyberPrivacyBriefing</code> → “Daily Cyber Privacy Briefing”).</li>
+                <li><b>Edit details</b> (Manage agents or the agent page) to add purpose, department, owners, risk tier, approval and budget. These drive the AI policy checks and the Cost rating.</li>
+                <li><b>Stop monitoring</b> hides an agent from every figure. Telemetry is kept and you can monitor it again from Manage agents.</li>
+                <li><b>Add by hand</b> is only needed for an agent that has not sent any telemetry yet.</li>
               </ul>
-              {sources?.registry?.label && <p className="help-note">The connected-agents list is stored in: <b>{sources.registry.label}</b>.</p>}
+              {sources?.registry?.label && <p className="help-note">Agent details are stored in: <b>{sources.registry.label}</b>.</p>}
             </section>
 
             <section id="help-status">
@@ -222,18 +220,16 @@ export default function Help({ close, library, initialSection = 'start', sources
               </div>
               <p>We deliberately do <b>not</b> average. An agent that is 99.9% available but leaking data is not “mostly fine”. With worst-wins, every red can be traced to one metric.</p>
               <h4>Why “No data” is never “Healthy”</h4>
-              <p>If a metric has no data source or too little activity (each metric has a minimum, e.g. 10 user messages), it shows <b>No data</b> and is left out of the roll-up. An agent is only called Healthy when its Health could actually be measured.</p>
+              <p>Each metric needs a minimum amount of activity (e.g. 5 runs or 10 user messages) before it is rated. Below that, its figure is still shown but the status is <b>No data</b> and it is left out of the roll-up.</p>
             </section>
 
             <section id="help-health">
               <h3>Health metrics</h3>
               <p className="lead">Is the agent answering, finishing the job, responding quickly, and are its tools working?</p>
-              <p>The Health card shows the share of conversations resolved across all connected agents, plus the share with errors, the share of user messages answered and the slowest agent.</p>
               <MetricTable library={library} pillar="health" />
               <ul>
-                <li><b>Only engaged conversations count</b> — the user sent at least one message. Channel events (e.g. “conversation started”) are not treated as user messages.</li>
-                <li><b>Response time</b> runs from a user message to the agent’s next reply. Replies slower than {slow}s count as “very slow”.</li>
-                <li><b>Resolved</b> means the agent replied, nothing broke, and the conversation was not escalated or sent to the fallback topic.</li>
+                <li><b>Runs</b> are chat conversations where a user sent a message, plus <b>automatic runs</b> started by a trigger or schedule (e.g. a daily briefing agent). Greeting-only sessions are not counted.</li>
+                <li><b>Response time</b> runs from a user message to the agent’s next reply. Replies slower than {slow}s count as “very slow”. Automatic runs have no chat reply, so they don’t affect availability or response time.</li>
                 <li><b>Safety blocks are not errors.</b> They are reported once, under Risk.</li>
               </ul>
             </section>
@@ -241,33 +237,31 @@ export default function Help({ close, library, initialSection = 'start', sources
             <section id="help-risk">
               <h3>Risk metrics</h3>
               <p className="lead">Is someone attacking the agent, is it meeting harmful content, or is it trying to do something it shouldn’t?</p>
-              <p>Copilot Studio checks every request and answer with Responsible AI filters. When something is blocked it records a <code>ContentFiltered</code> error with a sub-code that says why. The Risk card totals these “safety blocks”:</p>
+              <p>Copilot Studio checks requests and answers with Responsible AI filters. When something is blocked it records a <code>ContentFiltered</code> error with a sub-code that says why:</p>
               <ul>
                 <li><b>Jailbreak attempts</b> (OpenAIJailBreak) — a user tried to override the agent’s instructions.</li>
                 <li><b>Attacks hidden in documents</b> (OpenAIndirectAttack) — a knowledge source contained instructions aimed at the model.</li>
                 <li><b>Harmful content</b> (OpenAIHate, OpenAISexual, OpenAIViolence, OpenAISelfHarm).</li>
-                <li><b>Data policy blocks</b> (DataLossPreventionViolation) — the agent tried to use a connector a DLP policy forbids.</li>
+                <li><b>Data policy blocks</b> (DataLossPreventionViolation).</li>
               </ul>
               <MetricTable library={library} pillar="risk" />
-              <p className="help-note">A blocked attack is a successful defence, but it still raises Risk: someone is probing the agent. Model-level guardrail metrics in Azure AI Foundry are set per model deployment, not per agent, so they are not used for agent statuses.</p>
             </section>
 
             <section id="help-cost">
               <h3>Cost metrics</h3>
-              <p className="lead">What the agents are estimated to cost in the period, and how that compares with their budgets.</p>
+              <p className="lead">What the agents are estimated to cost, and how that compares with their budgets.</p>
               <MetricTable library={library} pillar="cost" />
               <ul>
-                <li><b>Copilot Studio agents</b> are billed in Copilot Credits (classic answer 1, generative answer 2, agent action 5, tenant graph grounding 10). Estimate = answered messages × credits per response (default {sources?.creditsPerResponse || 2}) × price per credit ($0.01 pay-as-you-go).</li>
-                <li>Agents used only by Microsoft 365 Copilot-licensed employees can be set to “Included in Microsoft 365 Copilot licences”.</li>
+                <li><b>Copilot Studio agents</b> are billed in Copilot Credits (classic answer 1, generative answer 2, agent action 5, tenant graph grounding 10). Estimate = (chat replies + automatic runs) × credits per response (default {sources?.creditsPerResponse || 2}) × price per credit ($0.01 pay-as-you-go).</li>
                 <li><b>Foundry / SDK agents</b>: tokens × the price for the model used.</li>
-                <li><b>Cost is only rated when a monthly budget is set</b> on the agent profile (Manage agents → edit). Without one, spend is still shown but Cost is “No data”, and the Cost card lists how many active agents have no budget.</li>
+                <li><b>Cost is only rated when a monthly budget is set</b> (Manage agents → Edit details). Without one, spend is still shown.</li>
                 <li>These are estimates for steering. Billed figures are in the Power Platform admin center and Azure Cost Management.</li>
               </ul>
             </section>
 
             <section id="help-policy">
               <h3>AI policy checks</h3>
-              <p>These drive the <b>Out of AI policy</b> figure. Each compares what the telemetry shows with the agent profile; an agent is out of policy if any check fails. Fix them by editing the agent under Manage agents.</p>
+              <p>These drive the <b>Out of AI policy</b> figure. Each compares the telemetry with the agent details; fix them by selecting <b>Edit details</b>.</p>
               {library && (
                 <table className="table help-table">
                   <thead><tr><th scope="col">Check</th><th scope="col">Rule</th></tr></thead>
@@ -285,25 +279,21 @@ export default function Help({ close, library, initialSection = 'start', sources
                 <ChevronRight size={18} aria-hidden="true" />
                 <div><b>Dashboard API</b><span>queries + metric library</span></div>
                 <ChevronRight size={18} aria-hidden="true" />
-                <div><b>This dashboard</b><span>connected agents only</span></div>
-              </div>
-              <div className="pipeline side-feed">
-                <div><b>Connected-agents list</b><span>which agents are monitored + their profile</span></div>
-                <span className="feed-label">joined by telemetry ID / aliases ↗</span>
+                <div><b>This dashboard</b><span>every agent, automatically</span></div>
               </div>
               <dl className="help-dl">
                 <dt>Runtime telemetry</dt><dd>Copilot Studio sends conversation events to Application Insights. The API reads them server-side; no credentials reach the browser.</dd>
-                <dt>Agent identity</dt><dd>Each conversation is assigned to exactly one agent — by its topic schema name (stable even if renamed), otherwise its bot name — and matched to a connected agent by telemetry ID or alias.</dd>
+                <dt>Agent identity</dt><dd>Each conversation is assigned to exactly one agent by its topic schema name (stable even if renamed), otherwise its bot name.</dd>
                 <dt>Production vs test</dt><dd>Copilot Studio flags test-pane traffic. Conversations without that flag count as production use.</dd>
-                <dt>Freshness</dt><dd>All queries share one fixed time window. Results are cached for one minute; Refresh and any change to the agent list always fetch new figures.</dd>
+                <dt>Freshness</dt><dd>Application Insights usually lags a few minutes. Results are cached for one minute; Refresh always fetches new figures.</dd>
               </dl>
             </section>
 
             <section id="help-live">
               <h3>Live data vs demo data</h3>
               <ul>
-                <li>In live mode <b>everything is live</b>: connected agents, their profiles and telemetry. No sample or template agents are mixed in.</li>
-                <li>If live data cannot be retrieved you see a red banner naming the step that failed, and no figures.</li>
+                <li>In live mode <b>everything is live</b>. No sample or template agents are mixed in.</li>
+                <li>If live data cannot be retrieved you see a red banner naming the step that failed.</li>
                 <li><b>Show demo data</b> loads a synthetic portfolio built with the same rules. It is clearly marked and read-only.</li>
               </ul>
               {mode && <p className="help-note">You are currently viewing: <b>{mode === 'live' ? 'live telemetry' : mode === 'demo' ? 'demo data' : mode === 'error' ? 'no data (live retrieval failed)' : 'loading'}</b>.</p>}
@@ -311,26 +301,22 @@ export default function Help({ close, library, initialSection = 'start', sources
 
             <section id="help-faq">
               <h3>FAQ and troubleshooting</h3>
-              <Faq q="The number of agents looks wrong.">Only connected agents are counted. Open Manage agents: the connected list is exactly what is counted, and any agent sending telemetry that is not connected is listed underneath.</Faq>
-              <Faq q="The same agent appears twice under “not connected”.">It sends telemetry under two names (e.g. its schema name and display name). Connect one and add the other name under “Other telemetry names”; both are then counted as one agent.</Faq>
-              <Faq q="Cost shows “No data” but there is spend.">Cost is only rated against a budget. Edit the agent and set a monthly budget.</Faq>
-              <Faq q="I can’t connect or remove agents.">Sign in (top right). If you are signed in and still blocked, your administrator may have limited changes to a specific role.</Faq>
-              <Faq q="An agent shows “No data” even though people use it.">Its activity is below the minimum for the selected period (try a longer period), or the specific metric needs a source that is not connected. The agent page lists every unmeasured metric and why.</Faq>
-              <Faq q="The page says live telemetry could not be retrieved.">The banner names the failing step. Typical causes: LOG_ANALYTICS_WORKSPACE_ID missing, the API identity lacks Log Analytics Reader, or the connected-agents storage cannot be read.</Faq>
-              <Faq q="Numbers differ from Copilot Studio’s built-in Analytics.">Copilot Studio Analytics uses its own session definitions. This dashboard counts engaged conversations and errors directly from Application Insights events, so small differences are normal.</Faq>
-              <Faq q="How do I change a limit or add a metric?">Edit api/shared/metrics-registry.js. Limits are defined once and applied everywhere on the next deployment. Then run npm run demo:generate.</Faq>
+              <Faq q="An agent shows “No data” even though it is used.">Its activity is below the minimum needed to rate a metric (e.g. 5 runs). The figures are still shown on its page; the status turns colour once there is enough activity. Try a longer reporting period.</Faq>
+              <Faq q="An agent shows “Last 90 days”.">It had no activity in the selected period, so the dashboard shows its most recent 90 days instead of a blank card.</Faq>
+              <Faq q="An agent appears twice.">It sends telemetry under two names. Edit one, add the other name under “Other telemetry names”, and stop monitoring the duplicate.</Faq>
+              <Faq q="Cost shows “No data” but there is spend.">Cost is only rated against a budget. Select Edit details and set a monthly budget.</Faq>
+              <Faq q="My changes disappear after a while.">The API is saving agent details in a temporary file. Set REGISTRY_BLOB_SAS_URL so they are stored permanently (see Data sources).</Faq>
+              <Faq q="The page says live telemetry could not be retrieved.">The banner names the failing step. Typical causes: LOG_ANALYTICS_WORKSPACE_ID missing, or the API identity lacks Log Analytics Reader.</Faq>
             </section>
 
             <section id="help-glossary">
               <h3>Glossary</h3>
               <dl className="help-dl">
-                <dt>Connected agent</dt><dd>An agent on the Manage agents list. Only these are monitored and counted.</dd>
+                <dt>Run</dt><dd>A chat conversation in which the user sent a message, or an automatic run started by a trigger or schedule.</dd>
                 <dt>Telemetry ID</dt><dd>The name an agent appears under in Application Insights — usually its Copilot Studio schema name.</dd>
-                <dt>Engaged conversation</dt><dd>A session in which the user sent at least one message.</dd>
                 <dt>Escalation / fallback</dt><dd>The conversation was handed to a human, or the agent did not understand the request.</dd>
                 <dt>95th percentile</dt><dd>95% of replies were faster than this value.</dd>
                 <dt>Safety block</dt><dd>A request or answer stopped by the platform guardrails.</dd>
-                <dt>DLP policy</dt><dd>A Power Platform data loss prevention rule controlling which connectors may be used.</dd>
                 <dt>Copilot Credit</dt><dd>The unit Copilot Studio usage is billed in.</dd>
                 <dt>Data coverage</dt><dd>Share of applicable metrics on active agents that have enough data to produce a status.</dd>
               </dl>
