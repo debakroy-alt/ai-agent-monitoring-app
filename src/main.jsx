@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import {
   Activity,
   AlertTriangle,
@@ -180,11 +181,37 @@ function StatusBadge({ value, size = 'md', title }) {
 }
 
 function Tip({ text, label = 'More information' }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState(null);
+  const show = () => {
+    const r = ref.current.getBoundingClientRect();
+    const width = 260;
+    const left = Math.min(Math.max(8, r.left + r.width / 2 - width / 2), window.innerWidth - width - 8);
+    const above = r.top > 140;
+    setPos({ left, top: above ? r.top - 8 : r.bottom + 8, above });
+  };
+  const hide = () => setPos(null);
+  useEffect(() => {
+    if (!pos) return undefined;
+    window.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
+    return () => {
+      window.removeEventListener('scroll', hide, true);
+      window.removeEventListener('resize', hide);
+    };
+  }, [pos]);
   return (
-    <span className="tip" tabIndex={0} role="note" aria-label={`${label}: ${text}`}>
-      <Info size={13} aria-hidden="true" />
-      <span className="tip-body">{text}</span>
-    </span>
+    <>
+      <span ref={ref} className="tip" tabIndex={0} role="button" aria-label={`${label}: ${text}`}
+        onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}
+        onClick={(e) => { e.stopPropagation(); e.preventDefault(); show(); }}>
+        <Info size={13} aria-hidden="true" />
+      </span>
+      {pos && createPortal(
+        <span role="tooltip" className={`tip-pop ${pos.above ? 'above' : 'below'}`} style={{ left: pos.left, top: pos.top }}>{text}</span>,
+        document.body
+      )}
+    </>
   );
 }
 
@@ -607,15 +634,11 @@ function OverallStrip({ agents, kpis, days, goAgents, goManage }) {
   const healthy = agents.filter((a) => a.statuses.overall === 'green').length;
   const p = periodOf(days);
   const items = [
-    { label: 'Monitored', value: fmtNum(kpis.monitored), caption: 'Seen in last 90 days', def: KPI_DEFS.monitored, onClick: goManage },
-    { label: 'Active', value: fmtNum(kpis.active), caption: p.label, def: KPI_DEFS.active },
+    { label: 'Agents monitored', value: fmtNum(kpis.monitored), caption: `${kpis.active} active in the ${p.label.toLowerCase()}`, def: KPI_DEFS.monitored, onClick: goManage },
     { label: 'Runs', value: fmtNum(kpis.runs), caption: p.label, def: KPI_DEFS.runs },
-    { label: 'Need attention', value: fmtNum(kpis.attention), caption: 'Watch or action', def: KPI_DEFS.attention, tone: kpis.attention ? 'amber' : '', onClick: () => goAgents({ status: 'attention' }) },
-    { label: 'Out of policy', value: fmtNum(kpis.nonCompliant), caption: 'Missing details', def: KPI_DEFS.compliance, tone: kpis.nonCompliant ? 'red' : '', onClick: () => goAgents({ nonCompliantOnly: true }) },
-    { label: 'Data coverage', value: `${kpis.coverage}%`, caption: 'Metrics rated', def: KPI_DEFS.coverage },
+    { label: 'Need attention', value: fmtNum(kpis.attention), caption: 'Watch or action required', def: KPI_DEFS.attention, tone: kpis.attention ? 'amber' : '', onClick: () => goAgents({ status: 'attention' }) },
+    { label: 'Missing details', value: fmtNum(kpis.nonCompliant), caption: 'Owners, department or approval', def: KPI_DEFS.compliance, tone: kpis.nonCompliant ? 'red' : '', onClick: () => goAgents({ nonCompliantOnly: true }) },
   ];
-  if (kpis.widened) items.push({ label: 'Quiet agents', value: fmtNum(kpis.widened), caption: 'Shown from 90 days', def: KPI_DEFS.widened, tone: 'blue', onClick: () => goAgents({ widenedOnly: true }) });
-
   return (
     <section className="overall-strip" aria-label="Overall summary" style={{ '--cells': items.length + 1 }}>
       <div className="os-cell os-overall">
@@ -636,6 +659,7 @@ function OverallStrip({ agents, kpis, days, goAgents, goManage }) {
     </section>
   );
 }
+
 
 function NoAgents({ removed, goManage }) {
   return (

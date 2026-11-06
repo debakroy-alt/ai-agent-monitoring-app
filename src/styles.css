@@ -169,9 +169,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; }
 .eyebrow { display: block; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
 
 .tip { position: relative; display: inline-flex; color: var(--faint); cursor: help; vertical-align: middle; }
-.tip-body { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); width: 260px; padding: 9px 11px; border-radius: 8px; font-size: 12px; line-height: 1.45; font-weight: 400; text-transform: none; letter-spacing: 0; text-align: left; white-space: normal; background: #1d1828; color: #f3f0f8; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); opacity: 0; pointer-events: none; transition: opacity 0.15s; z-index: 20; }
-.tip:hover .tip-body, .tip:focus .tip-body { opacity: 1; }
-
+.tip-pop { position: fixed; z-index: 1000; width: 260px; padding: 9px 11px; border-radius: 8px; font-size: 12px; line-height: 1.45; font-weight: 400; text-transform: none; letter-spacing: 0; text-align: left; white-space: normal; background: #1d1828; color: #f3f0f8; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); pointer-events: none; }
+.tip-pop.above { transform: translateY(-100%); }
 /* -------------------------------------------------------------- status */
 .status { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-weight: 500; border-radius: 99px; border: 0; font-size: 12.5px; padding: 5px 11px; line-height: 1.2; }
 .status i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
