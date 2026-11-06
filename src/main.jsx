@@ -63,6 +63,7 @@ const ENVIRONMENTS = ['Production', 'Test only', 'No activity'];
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
 export const KPI_DEFS = {
+  overall: 'The worst status of any monitored agent.',
   monitored: 'Every agent that sent telemetry to Application Insights in the last 90 days (plus any added by hand), minus agents you removed.',
   active: 'Agents with at least one conversation or automatic run in the selected period.',
   runs: 'Chat conversations where a user sent a message, plus automatic (trigger-started) runs. Greeting-only sessions are excluded.',
@@ -269,29 +270,33 @@ function SelectField({ label, tip, value, onChange, options }) {
   );
 }
 
+/** Status bar. With showLabels, a fixed 2×2 legend is shown underneath so every card lines up. */
 function StatusSplit({ counts, total, label, showLabels = false }) {
-  if (!total) return <div className="split-empty">No agents</div>;
+  const bar = total ? (
+    <div className="split" role="img" aria-label={`${label}: ${STATUS_ORDER.filter((s) => counts[s]).map((s) => `${counts[s]} ${STATUS_LABELS[s]}`).join(', ')}`}>
+      {STATUS_ORDER.map((s) =>
+        counts[s] ? (
+          <span key={s} className={`seg ${s}`} style={{ flexGrow: counts[s] }} title={`${counts[s]} ${STATUS_LABELS[s]}`}>
+            {counts[s]}
+          </span>
+        ) : null
+      )}
+    </div>
+  ) : (
+    <div className="split empty" />
+  );
+  if (!showLabels) return bar;
   return (
     <div className="split-wrap">
-      <div className="split" role="img" aria-label={`${label}: ${STATUS_ORDER.filter((s) => counts[s]).map((s) => `${counts[s]} ${STATUS_LABELS[s]}`).join(', ')}`}>
-        {STATUS_ORDER.map((s) =>
-          counts[s] ? (
-            <span key={s} className={`seg ${s}`} style={{ flexGrow: counts[s] }} title={`${counts[s]} ${STATUS_LABELS[s]}`}>
-              {counts[s]}
-            </span>
-          ) : null
-        )}
-      </div>
-      {showLabels && (
-        <ul className="split-labels">
-          {STATUS_ORDER.map((s) => (
-            <li key={s} className={counts[s] ? '' : 'zero'}>
-              <i className={`swatch ${s}`} aria-hidden="true" />
-              <b>{counts[s] || 0}</b> {STATUS_LABELS[s]}
-            </li>
-          ))}
-        </ul>
-      )}
+      {bar}
+      <ul className="split-labels">
+        {STATUS_ORDER.map((s) => (
+          <li key={s} className={counts[s] ? '' : 'zero'}>
+            <i className={`swatch ${s}`} aria-hidden="true" />
+            <b>{counts[s] || 0}</b> {STATUS_LABELS[s]}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -499,8 +504,7 @@ function portfolioFigures(agents, library) {
     slowest,
     jailbreaks: raw('jailbreaks'),
     indirect: raw('indirect'),
-    harmful: raw('harmful'),
-    dlp: raw('dlp'),
+    contentBlocks: raw('harmful') + raw('dlp'),
     safetyBlocks: raw('jailbreaks') + raw('indirect') + raw('harmful') + raw('dlp'),
     spend: spends.length ? sum(spends, (a) => a.spendUsd) : null,
     budgetUsedPct: budgetTotal ? pct(budgetSpend, budgetTotal) : null,
@@ -512,173 +516,123 @@ function portfolioFigures(agents, library) {
   };
 }
 
-function HeroStat({ label, value, status, tip }) {
-  return (
-    <div className="hero-stat">
-      <dt>
-        {label} {tip && <Tip text={tip} />}
-      </dt>
-      <dd className={status || ''}>{value}</dd>
-    </div>
-  );
-}
-
-function PillarHero({ pillar, agents, figures, scopeLabel, goAgents, openAgent }) {
+/**
+ * One Health / Risk / Cost card. Every card has exactly the same sections in
+ * the same order (header · headline figure · 3 key figures · agents by status ·
+ * footer) and the cards share row tracks, so each section lines up across all three.
+ */
+function PillarHero({ pillar, agents, figures, scopeLabel, goAgents }) {
   const meta = PILLAR_META[pillar];
   const Icon = meta.icon;
   const counts = countBy(agents, (a) => a.statuses[pillar]);
   const status = worst(agents.map((a) => a.statuses[pillar]));
-  const attention = agents
-    .filter((a) => ['red', 'amber'].includes(a.statuses[pillar]))
-    .sort((a, b) => STATUS_ORDER.indexOf(a.statuses[pillar]) - STATUS_ORDER.indexOf(b.statuses[pillar]) || b.volume - a.volume);
+  const attention = agents.filter((a) => ['red', 'amber'].includes(a.statuses[pillar])).length;
   const f = figures;
 
   let big;
   let stats;
   if (pillar === 'health') {
-    big = { value: fmtPct(f.resolvedPct), label: `of runs resolved · ${scopeLabel}`, status: f.resolvedStatus,
+    big = { label: 'Runs resolved', value: fmtPct(f.resolvedPct), status: f.resolvedStatus,
       tip: 'Conversations and automatic runs that finished without an error, escalation or fallback.' };
     stats = [
       { label: 'Runs with errors', value: fmtPct(f.errorPct), status: f.errorStatus },
       { label: 'User messages answered', value: fmtPct(f.replyPct), status: f.replyStatus },
-      { label: 'Slowest agent (95th pct.)', value: f.slowest ? `${Math.round(f.slowest.raw.p95 * 10) / 10}s` : '—', tip: f.slowest ? f.slowest.name : 'Needs at least 10 answered messages' },
+      { label: 'Slowest response (95th pct.)', value: f.slowest ? `${Math.round(f.slowest.raw.p95 * 10) / 10}s` : '—', tip: f.slowest ? `Agent: ${f.slowest.name}` : 'Needs at least 10 answered messages' },
     ];
   } else if (pillar === 'risk') {
-    big = { value: fmtNum(f.safetyBlocks), label: `safety blocks · ${scopeLabel}`, status: f.safetyBlocks ? 'amber' : f.engaged ? 'green' : 'unknown',
+    big = { label: 'Safety blocks', value: fmtNum(f.safetyBlocks), status: f.safetyBlocks ? 'amber' : f.engaged ? 'green' : 'unknown',
       tip: 'Requests or answers stopped by the platform guardrails: jailbreaks, attacks hidden in documents, harmful content and data-policy blocks.' };
     stats = [
       { label: 'Jailbreak attempts', value: fmtNum(f.jailbreaks) },
       { label: 'Attacks hidden in documents', value: fmtNum(f.indirect) },
-      { label: 'Harmful content (runs)', value: fmtNum(f.harmful) },
-      { label: 'Data policy (DLP) blocks', value: fmtNum(f.dlp) },
+      { label: 'Harmful content & policy blocks', value: fmtNum(f.contentBlocks) },
     ];
   } else {
-    big = { value: f.spend !== null ? fmtUsd(f.spend) : '—', label: `estimated spend · ${scopeLabel}`, status: f.overBudget ? 'red' : f.budgetStatus,
+    big = { label: 'Estimated spend', value: f.spend !== null ? fmtUsd(f.spend) : '—', status: f.overBudget ? 'red' : f.budgetStatus,
       tip: 'Copilot Studio: (chat replies + automatic runs) × credits per response × price per credit. Foundry: tokens × model price. An estimate, not an invoice.' };
     stats = [
-      { label: 'Budget used', value: f.budgetUsedPct !== null ? `${fmtPct(f.budgetUsedPct)} of ${fmtUsd(f.budgetTotal)}` : 'No budgets set', status: f.budgetStatus },
-      { label: 'Agents over budget', value: fmtNum(f.overBudget), status: f.overBudget ? 'red' : f.budgetTotal ? 'green' : '' },
-      { label: 'Active agents without a budget', value: fmtNum(f.noBudget), status: f.noBudget ? 'amber' : '', tip: 'Set a monthly budget under Manage agents to rate Cost.' },
+      { label: 'Budget used', value: f.budgetUsedPct !== null ? `${fmtPct(f.budgetUsedPct)} of ${fmtUsd(f.budgetTotal)}` : 'No budgets set', status: f.budgetStatus,
+        tip: f.noBudget ? `${plural(f.noBudget, 'active agent has', 'active agents have')} no budget. Set budgets under Manage agents to rate Cost.` : undefined },
+      { label: 'Agents over budget', value: fmtNum(f.overBudget), status: f.overBudget ? 'red' : '' },
       { label: 'Cost per run', value: f.costPerRun !== null ? fmtUsd(f.costPerRun) : '—' },
     ];
   }
 
   return (
-    <article className={`pillar-hero edge-top-${status}`}>
+    <article className={`pillar-hero tone-${status}`} aria-label={`${meta.name}: ${STATUS_LABELS[status]}`}>
       <header className="ph-head">
-        <span className="ph-icon"><Icon size={22} aria-hidden="true" /></span>
+        <span className="ph-icon"><Icon size={20} aria-hidden="true" /></span>
         <div className="ph-title">
           <h2>{meta.name}</h2>
           <span>{meta.question}</span>
         </div>
         <StatusBadge value={status} />
       </header>
+
       <div className="ph-big">
+        <span className="ph-big-label">{big.label} <Tip text={big.tip} /></span>
         <b className={big.status}>{big.value}</b>
-        <span>{big.label} <Tip text={big.tip} /></span>
+        <span className="ph-big-scope">{scopeLabel}</span>
       </div>
-      <dl className="hero-stats">{stats.map((s) => <HeroStat key={s.label} {...s} />)}</dl>
-      <div className="ph-section">
-        <span className="ph-label">Agents by {meta.name.toLowerCase()} status</span>
+
+      <dl className="ph-stats">
+        {stats.map((s) => (
+          <div key={s.label} className="ph-stat">
+            <dt>{s.label} {s.tip && <Tip text={s.tip} />}</dt>
+            <dd className={s.status || ''}>{s.value}</dd>
+          </div>
+        ))}
+      </dl>
+
+      <div className="ph-dist">
+        <span className="ph-label">Agents by status</span>
         <StatusSplit counts={counts} total={agents.length} label={`${meta.name} status of agents`} showLabels />
       </div>
-      <div className="ph-section">
-        <span className="ph-label">Needs attention</span>
-        {attention.length ? (
-          <ul className="ph-issues">
-            {attention.slice(0, 3).map((a) => {
-              const issue = a.alerts.find((x) => x.pillar === pillar);
-              return (
-                <li key={a.id}>
-                  <button type="button" onClick={() => openAgent(a.id, pillar)}>
-                    <i className={`dot ${a.statuses[pillar]}`} aria-label={STATUS_LABELS[a.statuses[pillar]]} />
-                    <span className="ph-agent">{a.name}</span>
-                    <span className="ph-why">{issue ? `${issue.metric}: ${issue.value}` : STATUS_LABELS[a.statuses[pillar]]}</span>
-                    <ChevronRight size={14} aria-hidden="true" />
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        ) : (
-          <p className="ph-none">{agents.some((a) => a.statuses[pillar] !== 'unknown') ? 'No agent needs attention.' : 'Too little activity to rate yet — figures are shown above.'}</p>
-        )}
-      </div>
-      <button className="link-btn ph-more" type="button" onClick={() => goAgents(attention.length ? { pillar, status: 'attention' } : {})}>
-        {attention.length > 3 ? `See all ${attention.length} agents` : `See all agents`} <ArrowRight size={13} />
-      </button>
+
+      <footer className="ph-foot">
+        <span className={attention ? 'ph-attn' : 'ph-ok'}>
+          {attention ? `${plural(attention, 'agent needs', 'agents need')} attention` : agents.some((a) => a.statuses[pillar] !== 'unknown') ? 'No agent needs attention' : 'Too little activity to rate yet'}
+        </span>
+        <button className="link-btn" type="button" onClick={() => goAgents(attention ? { pillar, status: 'attention' } : {})}>
+          View agents <ArrowRight size={13} />
+        </button>
+      </footer>
     </article>
   );
 }
 
-function buildKeyPoints({ agents, kpis, figures, days, scopeLabel }) {
-  const pts = [];
-  const counts = countBy(agents, (a) => a.statuses.overall);
-  pts.push(
-    <>
-      <b>{plural(agents.length, 'agent')}</b> monitored, <b>{fmtNum(kpis.active)}</b> active in the {periodOf(days).label.toLowerCase()}.{' '}
-      <b>{fmtNum(counts.green || 0)}</b> healthy, <b>{fmtNum(kpis.attention)}</b> need attention
-      {counts.unknown ? <>, {fmtNum(counts.unknown)} with too little activity to rate</> : null}.
-    </>
-  );
-  if (kpis.widened) {
-    pts.push(<><b>{plural(kpis.widened, 'agent')}</b> had no activity in the {periodOf(days).label.toLowerCase()}, so {kpis.widened === 1 ? 'its' : 'their'} status uses the last 90 days.</>);
-  }
-  const red = agents.filter((a) => a.statuses.overall === 'red');
-  if (red.length) {
-    pts.push(
-      <>
-        <b>Action required:</b> {red.slice(0, 4).map((a) => `${a.name}${a.environment === 'Test only' ? ' (test only)' : ''}`).join(', ')}
-        {red.length > 4 ? ` and ${red.length - 4} more` : ''}.
-      </>
-    );
-  }
-  if (kpis.nonCompliant) {
-    pts.push(<><b>{plural(kpis.nonCompliant, 'agent is', 'agents are')}</b> missing governance details (owners, department, risk tier or approval). Add them under Manage agents.</>);
-  }
-  if (figures.spend !== null) {
-    pts.push(
-      <>
-        Estimated spend ({scopeLabel}): <b>{fmtUsd(figures.spend)}</b>
-        {figures.overBudget ? <>; <b>{plural(figures.overBudget, 'agent is', 'agents are')} over budget</b></> : figures.budgetTotal ? <>; no agent is over budget</> : <>; no budgets are set yet</>}.
-      </>
-    );
-  }
-  return pts;
-}
-
+/** Secondary overall summary: equal cells, each with label · value · caption on fixed lines. */
 function OverallStrip({ agents, kpis, days, goAgents, goManage }) {
   const overall = worst(agents.map((a) => a.statuses.overall));
   const healthy = agents.filter((a) => a.statuses.overall === 'green').length;
+  const p = periodOf(days);
   const items = [
-    { label: 'Agents monitored', value: fmtNum(kpis.monitored), def: KPI_DEFS.monitored, onClick: goManage },
-    { label: 'Active in period', value: fmtNum(kpis.active), def: KPI_DEFS.active },
-    { label: 'Conversations & runs', value: fmtNum(kpis.runs), def: KPI_DEFS.runs },
-    { label: 'Need attention', value: fmtNum(kpis.attention), def: KPI_DEFS.attention, tone: kpis.attention ? 'amber' : '', onClick: () => goAgents({ status: 'attention' }) },
-    { label: 'Out of AI policy', value: fmtNum(kpis.nonCompliant), def: KPI_DEFS.compliance, tone: kpis.nonCompliant ? 'red' : '', onClick: () => goAgents({ nonCompliantOnly: true }) },
-    { label: 'Data coverage', value: `${kpis.coverage}%`, def: KPI_DEFS.coverage },
+    { label: 'Monitored', value: fmtNum(kpis.monitored), caption: 'Seen in last 90 days', def: KPI_DEFS.monitored, onClick: goManage },
+    { label: 'Active', value: fmtNum(kpis.active), caption: p.label, def: KPI_DEFS.active },
+    { label: 'Runs', value: fmtNum(kpis.runs), caption: p.label, def: KPI_DEFS.runs },
+    { label: 'Need attention', value: fmtNum(kpis.attention), caption: 'Watch or action', def: KPI_DEFS.attention, tone: kpis.attention ? 'amber' : '', onClick: () => goAgents({ status: 'attention' }) },
+    { label: 'Out of policy', value: fmtNum(kpis.nonCompliant), caption: 'Missing details', def: KPI_DEFS.compliance, tone: kpis.nonCompliant ? 'red' : '', onClick: () => goAgents({ nonCompliantOnly: true }) },
+    { label: 'Data coverage', value: `${kpis.coverage}%`, caption: 'Metrics rated', def: KPI_DEFS.coverage },
   ];
-  if (kpis.widened) items.push({ label: 'Shown from last 90 days', value: fmtNum(kpis.widened), def: KPI_DEFS.widened, tone: 'muted', onClick: () => goAgents({ widenedOnly: true }) });
+  if (kpis.widened) items.push({ label: 'Quiet agents', value: fmtNum(kpis.widened), caption: 'Shown from 90 days', def: KPI_DEFS.widened, tone: 'blue', onClick: () => goAgents({ widenedOnly: true }) });
+
   return (
-    <section className="overall-strip" aria-label="Overall status">
-      <div className="os-status">
-        <span className="os-label">Overall status · {periodOf(days).label.toLowerCase()} <Tip text="The worst status of any monitored agent." /></span>
-        <div className="os-line">
-          <StatusBadge value={overall} size="sm" />
-          <span><b>{healthy}</b> of {plural(agents.length, 'agent')} healthy</span>
-        </div>
+    <section className="overall-strip" aria-label="Overall summary" style={{ '--cells': items.length + 1 }}>
+      <div className="os-cell os-overall">
+        <span className="os-label">Overall status <Tip text={KPI_DEFS.overall} /></span>
+        <span className="os-value"><StatusBadge value={overall} size="sm" /></span>
+        <span className="os-caption">{healthy} of {plural(agents.length, 'agent')} healthy</span>
       </div>
-      <dl className="os-items">
-        {items.map((it) => {
-          const Tag = it.onClick ? 'button' : 'div';
-          return (
-            <Tag key={it.label} className={`os-item ${it.onClick ? 'clickable' : ''}`} onClick={it.onClick} type={it.onClick ? 'button' : undefined}>
-              <dt>{it.label} <Tip text={it.def} /></dt>
-              <dd className={it.tone || ''}>{it.value}</dd>
-            </Tag>
-          );
-        })}
-      </dl>
+      {items.map((it) => {
+        const Tag = it.onClick ? 'button' : 'div';
+        return (
+          <Tag key={it.label} className={`os-cell ${it.onClick ? 'clickable' : ''}`} onClick={it.onClick} type={it.onClick ? 'button' : undefined}>
+            <span className="os-label">{it.label} <Tip text={it.def} /></span>
+            <span className={`os-value ${it.tone || ''}`}>{it.value}</span>
+            <span className="os-caption">{it.caption}</span>
+          </Tag>
+        );
+      })}
     </section>
   );
 }
@@ -701,10 +655,9 @@ function NoAgents({ removed, goManage }) {
 function Overview({ agents, removed, days, library, kpis, goAgents, goManage, openAgent }) {
   const active = useMemo(() => agents.filter((a) => !a.widened && a.volume > 0), [agents]);
   const figAgents = active.length ? active : agents;
-  const scopeLabel = active.length ? periodOf(days).short : 'last 90 days';
+  const scopeLabel = active.length ? periodOf(days).label : 'Last 90 days';
   const figures = useMemo(() => portfolioFigures(figAgents, library), [figAgents, library]);
-  const chartAgents = active.length ? active : [];
-  const series = useMemo(() => aggregateSeries(chartAgents), [chartAgents]);
+  const series = useMemo(() => aggregateSeries(active), [active]);
   const thresholds = library?.metrics?.find((m) => m.id === 'failed_execution_rate')?.thresholds || { green: 2, amber: 5 };
   const points = series.map((s) => ({ t: s.t, n: s.conversations, value: s.conversations ? Math.round((1000 * s.failed) / s.conversations) / 10 : null }));
   if (!agents.length) return <NoAgents removed={removed.length} goManage={goManage} />;
@@ -718,14 +671,12 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
     });
     return Object.values(m).sort((x, y) => (x.name === 'Unassigned') - (y.name === 'Unassigned') || y.agents.length - x.agents.length || x.name.localeCompare(y.name));
   })();
-  const needAction = agents.filter((a) => ['red', 'amber'].includes(a.statuses.overall));
-  const keyPoints = buildKeyPoints({ agents, kpis, figures, days, scopeLabel });
 
   return (
     <>
       <section className="hero-grid" aria-label="Health, risk and cost">
         {PILLARS.map((pl) => (
-          <PillarHero key={pl} pillar={pl} agents={agents} figures={figures} scopeLabel={scopeLabel} goAgents={goAgents} openAgent={openAgent} />
+          <PillarHero key={pl} pillar={pl} agents={agents} figures={figures} scopeLabel={scopeLabel} goAgents={goAgents} />
         ))}
       </section>
       {!active.length && (
@@ -735,10 +686,6 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
       )}
 
       <OverallStrip agents={agents} kpis={kpis} days={days} goAgents={goAgents} goManage={goManage} />
-
-      <Panel title="What leadership should know" subtitle={`Plain-English summary · ${periodOf(days).label.toLowerCase()}`}>
-        <ul className="key-points">{keyPoints.map((pt, i) => <li key={i}>{pt}</li>)}</ul>
-      </Panel>
 
       <div className="chart-grid">
         <Panel title="Conversations & runs over time" subtitle={`Per ${days === 1 ? 'hour' : 'day'}, all agents active in the ${periodOf(days).label.toLowerCase()}`} tip="Each bar is one hour or day. Colours show how those conversations and runs ended.">
@@ -756,9 +703,9 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
           <thead>
             <tr>
               <th scope="col">Department</th>
-              <th scope="col">Agents</th>
+              <th scope="col" className="num">Agents</th>
               <th scope="col" className="wide">Agents by status</th>
-              <th scope="col">Need attention</th>
+              <th scope="col" className="num">Need attention</th>
               <th scope="col"><span className="sr-only">Open</span></th>
             </tr>
           </thead>
@@ -766,9 +713,9 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
             {departments.map((d) => (
               <tr key={d.name} tabIndex={0} onClick={() => goAgents({ department: d.name })} onKeyDown={(e) => e.key === 'Enter' && goAgents({ department: d.name })}>
                 <td><b>{d.name}</b></td>
-                <td>{d.agents.length}</td>
+                <td className="num">{d.agents.length}</td>
                 <td><StatusSplit counts={d.counts} total={d.agents.length} label={`${d.name} agents by status`} /></td>
-                <td>{(d.counts.red || 0) + (d.counts.amber || 0)}</td>
+                <td className="num">{(d.counts.red || 0) + (d.counts.amber || 0)}</td>
                 <td className="row-go"><ChevronRight size={16} aria-hidden="true" /></td>
               </tr>
             ))}
@@ -783,7 +730,7 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
               <tr>
                 <th scope="col">Agent</th>
                 <th scope="col">Used in</th>
-                <th scope="col">Runs</th>
+                <th scope="col" className="num">Runs</th>
                 <th scope="col">Last activity</th>
                 {PILLARS.map((pl) => <th key={pl} scope="col">{PILLAR_META[pl].name}</th>)}
                 <th scope="col">Overall</th>
@@ -795,7 +742,7 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
                 <tr key={a.id} onClick={() => openAgent(a.id)} tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && openAgent(a.id)}>
                   <td><b>{a.name}</b>{a.widened && <span className="block"><WidenedTag agent={a} compact /></span>}</td>
                   <td>{a.environment}</td>
-                  <td>{fmtNum(a.volume)}</td>
+                  <td className="num">{fmtNum(a.volume)}</td>
                   <td>{relTime(a.lastSeen)}</td>
                   {PILLARS.map((pl) => <td key={pl}><StatusBadge value={a.statuses[pl]} size="sm" /></td>)}
                   <td><StatusBadge value={a.statuses.overall} size="sm" /></td>
@@ -805,7 +752,6 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
             </tbody>
           </table>
         </div>
-        {needAction.length === 0 && <p className="muted small-note">No agent currently needs action.</p>}
       </Panel>
     </>
   );
@@ -898,7 +844,7 @@ function Agents({ agents, filters, setFilters, groupBy, setGroupBy, openAgent, g
   const describe = ([k, v]) => {
     if (k === 'status') return `${filters.pillar !== 'overall' ? PILLAR_META[filters.pillar].name : 'Status'}: ${v === 'attention' ? 'Need attention' : STATUS_LABELS[v]}`;
     if (k === 'nonCompliantOnly') return 'Out of AI policy only';
-    if (k === 'widenedOnly') return 'Shown from last 90 days';
+    if (k === 'widenedOnly') return 'Quiet agents (last 90 days)';
     if (k === 'query') return `Search: “${v}”`;
     const names = { environment: 'Used in', department: 'Department', location: 'Location', owner: 'Owner', platform: 'Platform', riskTier: 'Risk tier' };
     return `${names[k]}: ${v}`;
@@ -1009,7 +955,6 @@ function MetricRow({ metric }) {
 function AgentDetail({ agent, pillar, setPillar, back, library, canEdit, onEdit, onRemove }) {
   const { openHelp } = useApp();
   const metrics = agent.metrics[pillar] || [];
-  // Show every metric that has a value (even when there is too little activity to rate it).
   const shown = metrics.filter((m) => m.value !== 'Not available');
   const unavailable = metrics.filter((m) => m.value === 'Not available');
   const components = library?.healthComponents || {};
@@ -1128,10 +1073,10 @@ function AgentDetail({ agent, pillar, setPillar, back, library, canEdit, onEdit,
           {agent.topErrorCodes?.length > 0 && (
             <Panel title="Most frequent error codes" tip="Error codes recorded by the platform in the period.">
               <table className="table compact">
-                <thead><tr><th scope="col">Code</th><th scope="col">Meaning</th><th scope="col">Count</th></tr></thead>
+                <thead><tr><th scope="col">Code</th><th scope="col">Meaning</th><th scope="col" className="num">Count</th></tr></thead>
                 <tbody>
                   {agent.topErrorCodes.map((c) => (
-                    <tr key={c.code}><td><code>{c.code}</code></td><td>{ERROR_HELP[c.code] || 'See the Copilot Studio error-code reference'}</td><td>{fmtNum(c.count)}</td></tr>
+                    <tr key={c.code}><td><code>{c.code}</code></td><td>{ERROR_HELP[c.code] || 'See the Copilot Studio error-code reference'}</td><td className="num">{fmtNum(c.count)}</td></tr>
                   ))}
                 </tbody>
               </table>
@@ -1365,14 +1310,14 @@ function Manage({ agents, removed, payload, mode, onAdd, onEdit, onRemove, onRes
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th scope="col">Agent</th><th scope="col">Telemetry ID</th><th scope="col">Runs (90 days)</th><th scope="col">Last activity</th><th scope="col"><span className="sr-only">Actions</span></th></tr>
+                <tr><th scope="col">Agent</th><th scope="col">Telemetry ID</th><th scope="col" className="num">Runs (90 days)</th><th scope="col">Last activity</th><th scope="col"><span className="sr-only">Actions</span></th></tr>
               </thead>
               <tbody>
                 {removed.map((r) => (
                   <tr key={r.id}>
                     <td><b>{r.name}</b></td>
                     <td><code>{r.id}</code></td>
-                    <td>{fmtNum(r.runs)}</td>
+                    <td className="num">{fmtNum(r.runs)}</td>
                     <td>{relTime(r.lastSeen)}</td>
                     <td className="row-actions">{!readOnly && <button className="ghost-btn small" type="button" disabled={busy} onClick={() => onRestore(r)}><RotateCcw size={14} /> Monitor again</button>}</td>
                   </tr>
@@ -1657,7 +1602,6 @@ function App() {
   };
   const refresh = () => (source === 'demo' ? loadDemo(days) : load(days, { fresh: true }));
 
-  // --------------------------------------------------------- agent settings actions
   const run = async (fn, okText) => {
     setBusy(true);
     try {
