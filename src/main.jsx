@@ -615,7 +615,7 @@ function pillarFillers(pillar, f) {
   if (pillar === 'risk') {
     const s = (n) => (n ? 'amber' : f.engaged ? 'green' : 'unknown');
     return [
-      { id: 'prompt_injection_attempts', label: 'Jailbreak attempts blocked', value: fmtNum(f.jailbreaks), status: s(f.jailbreaks) },
+      { id: 'prompt_injection_attempts', label: 'Jailbreak attempts', value: fmtNum(f.jailbreaks), status: s(f.jailbreaks) },
       { id: 'indirect_attacks', label: 'Attacks hidden in documents', value: fmtNum(f.indirect), status: s(f.indirect) },
       { id: 'content_safety_blocks', label: 'Harmful content & policy blocks', value: fmtNum(f.contentBlocks), status: s(f.contentBlocks) },
     ];
@@ -627,54 +627,97 @@ function pillarFillers(pillar, f) {
   ];
 }
 
-/** One plain-English sentence that explains the badge. */
-function pillarSentence(pillar, issues, counts, f, library) {
-  const top = issues[0];
-  if (top) {
+/** Pillar-specific words, so Risk never says "healthy" and Cost never says "working". */
+const PILLAR_WORDS = {
+  health: {
+    badge: { red: 'Action required', amber: 'Watch', green: 'Working well', unknown: 'Not measured' },
+    legend: { red: 'failing', amber: 'degraded', green: 'working well', unknown: 'not measured' },
+    problem: { one: 'has problems', many: 'have problems' },
+    allOk: 'working well',
+    okSentence: 'Messages are answered, runs finish and replies arrive on time.',
+  },
+  risk: {
+    badge: { red: 'Action required', amber: 'Watch', green: 'Safe', unknown: 'Not measured' },
+    legend: { red: 'unsafe activity', amber: 'to review', green: 'safe', unknown: 'not measured' },
+    problem: { one: 'shows risky activity', many: 'show risky activity' },
+    allOk: 'safe',
+    okSentence: 'No attacks, harmful content or data-policy blocks.',
+  },
+  cost: {
+    badge: { red: 'Action required', amber: 'Watch', green: 'Within budget', unknown: 'Not measured' },
+    legend: { red: 'over budget', amber: 'near budget', green: 'within budget', unknown: 'not measured' },
+    problem: { one: 'is over or near budget', many: 'are over or near budget' },
+    allOk: 'within budget',
+    okSentence: 'Spend is within budget.',
+  },
+};
+
+function PillarHero({ pillar, agents, statusOf, figures, scopeLabel, library, goAgents, openAgent }) {
+  const meta = PILLAR_META[pillar];
+  const words = PILLAR_WORDS[pillar];
+  const Icon = meta.icon;
+  const total = agents.length;
+  const counts = countBy(agents, (a) => statusOf(a, pillar));
+  const red = counts.red || 0;
+  const amber = counts.amber || 0;
+  const green = counts.green || 0;
+  const unmeasured = counts.unknown || 0;
+  const attention = red + amber;
+  const measured = attention + green;
+  const status = red ? 'red' : amber ? 'amber' : green ? 'green' : 'unknown';
+
+  // Only measured agents can drive the "why" rows, so the rows always agree with the count.
+  const measuredAgents = useMemo(() => agents.filter((a) => statusOf(a, pillar) !== 'unknown'), [agents, pillar, statusOf]);
+  const issues = useMemo(() => pillarIssues(measuredAgents, pillar), [measuredAgents, pillar]);
+
+  // 1. Headline — always "X of <all monitored agents>"
+  let bigValue;
+  let bigTone;
+  let bigText;
+  if (attention) {
+    bigValue = attention; bigTone = red ? 'red' : 'amber';
+    bigText = `of ${total} agents ${attention === 1 ? words.problem.one : words.problem.many}`;
+  } else if (measured) {
+    bigValue = measured; bigTone = 'green';
+    bigText = `of ${total} agents ${measured === 1 ? 'is' : 'are'} ${words.allOk}`;
+  } else {
+    bigValue = 0; bigTone = 'unknown';
+    bigText = `of ${total} agents measured`;
+  }
+
+  // 2. One sentence that explains the headline
+  let sentence;
+  const notMeasuredNote = unmeasured
+    ? ` ${plural(unmeasured, 'other agent')} had too little activity to measure.`
+    : '';
+  if (issues[0]) {
+    const top = issues[0];
     const { agent, metric } = top.agents[0];
     const others = top.agents.length - 1;
-    return {
+    sentence = {
       tone: top.status,
       text: (
         <>
-          <b>{ISSUE_TEXT[top.id] || metric.name}</b> {metric.value} on {agent.name}
+          Main issue: <b>{(ISSUE_TEXT[top.id] || metric.name).toLowerCase()} {metric.value}</b> on {agent.name}
           {others > 0 ? ` and ${plural(others, 'other agent')}` : ''} <span className="ph-target">({targetText(library, top.id)})</span>
         </>
       ),
     };
+  } else if (measured) {
+    sentence = { tone: 'green', text: `${words.okSentence}${notMeasuredNote}` };
+  } else if (pillar === 'cost' && figures.spend !== null) {
+    sentence = { tone: 'unknown', text: <>No budgets are set, so spend can’t be compared to a limit. Estimated spend: <b>{fmtUsd(figures.spend)}</b>.</> };
+  } else {
+    sentence = { tone: 'unknown', text: 'No agent had enough activity to measure. Try a longer reporting period.' };
   }
-  const rated = (counts.green || 0) + (counts.amber || 0) + (counts.red || 0);
-  if (rated) {
-    const ok = { health: 'Agents are answering, finishing the job and responding on time.', risk: 'No unsafe behaviour or attacks detected.', cost: 'Spend is within budget.' };
-    return { tone: 'green', text: ok[pillar] };
-  }
-  if (pillar === 'cost' && f.noBudget) {
-    return { tone: 'unknown', text: <>No budgets set, so cost can’t be rated. Estimated spend so far: <b>{f.spend !== null ? fmtUsd(f.spend) : '—'}</b>.</> };
-  }
-  return { tone: 'unknown', text: 'Too little activity to rate yet. Try a longer reporting period.' };
-}
 
-function PillarHero({ pillar, agents, figures, scopeLabel, library, goAgents, openAgent }) {
-  const meta = PILLAR_META[pillar];
-  const Icon = meta.icon;
-  const counts = countBy(agents, (a) => a.statuses[pillar]);
-  const status = worst(agents.map((a) => a.statuses[pillar]));
-  const red = counts.red || 0;
-  const amber = counts.amber || 0;
-  const attention = red + amber;
-  const rated = attention + (counts.green || 0);
-  const unrated = counts.unknown || 0;
-
-  const issues = useMemo(() => pillarIssues(agents, pillar), [agents, pillar]);
-  const sentence = pillarSentence(pillar, issues, counts, figures, library);
-
-  // "Why" rows: failing checks first (named agent + worst value), then rated portfolio figures.
+  // 3. Supporting rows: failing checks first, then portfolio figures for measured agents
   const issueRows = issues.slice(0, 3).map((i) => {
     const { agent, metric } = i.agents[0];
     return {
       key: i.id,
       label: ISSUE_TEXT[i.id] || metric.name,
-      detail: i.agents.length > 1 ? `${plural(i.agents.length, 'agent')} · worst ${agent.name}` : agent.name,
+      detail: i.agents.length > 1 ? `${i.agents.length} agents · worst: ${agent.name}` : agent.name,
       value: metric.value,
       status: i.status,
       target: targetText(library, i.id),
@@ -682,42 +725,30 @@ function PillarHero({ pillar, agents, figures, scopeLabel, library, goAgents, op
     };
   });
   const used = new Set(issueRows.map((r) => r.key));
+  const fillDetail = `All active agents · ${scopeLabel.toLowerCase()}`;
   const fillRows = pillarFillers(pillar, figures)
     .filter((r) => !used.has(r.id))
-    .map((r) => ({ key: r.id, label: r.label, detail: scopeLabel, value: r.value, status: r.status, target: targetText(library, r.id) }));
+    .map((r) => ({ key: r.id, label: r.label, detail: fillDetail, value: r.value, status: measured ? r.status : r.status && 'unknown', target: targetText(library, r.id) }));
   const rows = [...issueRows, ...fillRows].slice(0, 3);
 
-  // Verdict
-  let bigValue;
-  let bigText;
-  if (attention) {
-    bigValue = fmtNum(attention);
-    bigText = `of ${plural(rated, 'rated agent')} ${attention === 1 ? 'needs' : 'need'} attention`;
-  } else if (rated) {
-    bigValue = fmtNum(rated);
-    bigText = rated === 1 ? 'rated agent, healthy' : 'rated agents, all healthy';
-  } else {
-    bigValue = '—';
-    bigText = pillar === 'cost' && figures.noBudget ? 'not rated — no budgets set' : 'not rated yet';
-  }
-
-  const flagged = agents.filter((a) => a.statuses[pillar] === 'red' || a.statuses[pillar] === 'amber')
-    .sort((x, y) => SEVERITY_RANK[x.statuses[pillar]] - SEVERITY_RANK[y.statuses[pillar]]);
+  const legend = ['red', 'amber', 'green', 'unknown'].filter((s) => counts[s]).map((s) => `${counts[s]} ${words.legend[s]}`);
+  const flagged = measuredAgents.filter((a) => ['red', 'amber'].includes(statusOf(a, pillar)))
+    .sort((x, y) => SEVERITY_RANK[statusOf(x, pillar)] - SEVERITY_RANK[statusOf(y, pillar)]);
 
   return (
-    <article className={`pillar-hero tone-${status}`} aria-label={`${meta.name}: ${STATUS_LABELS[status]}`}>
+    <article className={`pillar-hero tone-${status}`} aria-label={`${meta.name}: ${words.badge[status]}`}>
       <header className="ph-head">
         <span className="ph-icon"><Icon size={20} aria-hidden="true" /></span>
         <div className="ph-title">
           <h2>{meta.name}</h2>
           <span>{meta.question}</span>
         </div>
-        <StatusBadge value={status} />
+        <span className={`status ${status} md`} title={STATUS_MEANING[status]}><i aria-hidden="true" />{words.badge[status]}</span>
       </header>
 
       <div className="ph-verdict">
         <div className="ph-count">
-          <b className={attention ? (red ? 'red' : 'amber') : rated ? 'green' : 'unknown'}>{bigValue}</b>
+          <b className={bigTone}>{bigValue}</b>
           <span>{bigText}</span>
         </div>
         <p className={`ph-sentence ${sentence.tone}`}>{sentence.text}</p>
@@ -725,10 +756,10 @@ function PillarHero({ pillar, agents, figures, scopeLabel, library, goAgents, op
 
       <div className="ph-why">
         <span className="ph-label">
-          {issueRows.length ? 'What’s driving this' : 'Key figures'}{' '}
+          {issueRows.length ? 'What needs attention' : 'Key figures'}{' '}
           <Tip text={issueRows.length
-            ? 'Checks outside their limits, worst first. The agent named is the worst case; select a row to open its evidence.'
-            : `Portfolio figures for agents active in the ${scopeLabel.toLowerCase()}, rated against the same limits as each agent.`} />
+            ? 'Checks outside their limits, worst first. Select a row to open that agent’s evidence.'
+            : `Combined figures for agents with enough activity in the ${scopeLabel.toLowerCase()}.`} />
         </span>
         <ul className="ph-rows">
           {rows.map((r) => {
@@ -754,22 +785,21 @@ function PillarHero({ pillar, agents, figures, scopeLabel, library, goAgents, op
       </div>
 
       <div className="ph-dist">
-        <StatusSplit counts={counts} total={agents.length} label={`${meta.name} status of agents`} />
+        <StatusSplit counts={counts} total={total} label={`${meta.name}: ${legend.join(', ')}`} />
         <span className="ph-dist-text">
-          {[red && `${red} action`, amber && `${amber} watch`, counts.green && `${counts.green} healthy`].filter(Boolean).join(' · ') || 'None rated'}
-          {unrated ? <span className="muted"> · {unrated} too quiet to rate</span> : null}
+          <b>{total} agents:</b> {legend.join(' · ')}
         </span>
       </div>
 
       <footer className="ph-foot">
-        <span className={`ph-who ${attention ? '' : 'ok'}`}>
+        <span className="ph-who">
           {flagged.length ? (
             <>
-              Look at:{' '}
+              Start with{' '}
               <button type="button" className="link-btn inline" onClick={() => openAgent(flagged[0].id, pillar)}>{flagged[0].name}</button>
               {flagged.length > 1 && <span className="muted"> +{flagged.length - 1} more</span>}
             </>
-          ) : rated ? 'No agent needs attention' : 'Nothing to act on yet'}
+          ) : measured ? 'Nothing to act on' : 'Nothing measured yet'}
         </span>
         <button className="link-btn" type="button" onClick={() => goAgents(attention ? { pillar, status: 'attention' } : {})}>
           View agents <ArrowRight size={13} />
@@ -832,6 +862,12 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
   const figAgents = active.length ? active : agents;
   const scopeLabel = active.length ? periodOf(days).label : 'Last 90 days';
   const figures = useMemo(() => portfolioFigures(figAgents, library), [figAgents, library]);
+  // One rule for all three cards: an agent counts as measured only if it was active in the
+  // selected period (unless nothing was active, then the 90-day fallback is used everywhere).
+  const statusOf = useCallback(
+    (a, pillar) => (active.length && (a.widened || !a.volume) ? 'unknown' : a.statuses[pillar] || 'unknown'),
+    [active]
+  );
   const series = useMemo(() => aggregateSeries(active), [active]);
   const thresholds = library?.metrics?.find((m) => m.id === 'failed_execution_rate')?.thresholds || { green: 2, amber: 5 };
   const points = series.map((s) => ({ t: s.t, n: s.conversations, value: s.conversations ? Math.round((1000 * s.failed) / s.conversations) / 10 : null }));
@@ -851,7 +887,7 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
     <>
       <section className="hero-grid" aria-label="Health, risk and cost">
         {PILLARS.map((pl) => (
-          <PillarHero key={pl} pillar={pl} agents={agents} figures={figures} scopeLabel={scopeLabel} library={library} goAgents={goAgents} openAgent={openAgent} />
+          <PillarHero key={pl} pillar={pl} agents={agents} statusOf={statusOf} figures={figures} scopeLabel={scopeLabel} library={library} goAgents={goAgents} openAgent={openAgent} />
         ))}
       </section>
       {!active.length && (
