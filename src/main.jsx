@@ -543,47 +543,166 @@ function portfolioFigures(agents, library) {
   };
 }
 
-/**
- * One Health / Risk / Cost card. Every card has exactly the same sections in
- * the same order (header · headline figure · 3 key figures · agents by status ·
- * footer) and the cards share row tracks, so each section lines up across all three.
- */
-function PillarHero({ pillar, agents, figures, scopeLabel, goAgents }) {
+/* -------------------------------------------------------------------------
+ * HERO — executive Health / Risk / Cost cards
+ *
+ * Design rule: the headline can never contradict the badge.
+ *   1. Verdict   — how many agents need attention (straight from agent statuses,
+ *                  the same numbers that drive the badge).
+ *   2. Why       — the checks that are failing, worst first, with the agent and
+ *                  the target. Remaining rows show the portfolio figure, rated.
+ *   3. Coverage  — one compact bar; "No data" is shown as a gap, never a pass.
+ *   4. Who       — the agents to look at, one click away.
+ * ----------------------------------------------------------------------- */
+const SEVERITY_RANK = { red: 0, amber: 1, green: 2, unknown: 3 };
+
+/** Short target text for a metric, e.g. "target ≥ 99%" or "target ≤ 10s". */
+function targetText(library, id) {
+  const m = library?.metrics?.find((x) => x.id === id);
+  const t = m?.thresholds;
+  if (!t) return '';
+  const u = m.unit === '%' ? '%' : m.unit === 's' ? 's' : '';
+  if (id === 'prompt_injection_attempts') return 'target: none';
+  if (m.unit === 'count') return t.green === 0 ? 'target: none' : `target ≤ ${t.green}`;
+  return `target ${t.higherIsBetter ? '≥' : '≤'} ${t.green}${u}`;
+}
+
+/** Short executive wording for each metric. */
+const ISSUE_TEXT = {
+  agent_availability: 'Messages answered',
+  task_completion: 'Runs resolved',
+  p95_latency: 'Response time',
+  timeout_rate: 'Very slow replies',
+  failed_execution_rate: 'Runs with errors',
+  dependency_failure_rate: 'Tool & connector failures',
+  prompt_injection_attempts: 'Jailbreak attempts',
+  indirect_attacks: 'Attacks hidden in documents',
+  content_safety_blocks: 'Harmful content blocked',
+  dlp_violations: 'Data policy blocks',
+  spend: 'Spend vs budget',
+};
+
+/** Failing checks for one pillar, grouped by metric: worst status first, then most agents affected. */
+function pillarIssues(agents, pillar) {
+  const byMetric = new Map();
+  agents.forEach((a) =>
+    (a.metrics?.[pillar] || []).forEach((m) => {
+      if (m.status !== 'red' && m.status !== 'amber') return;
+      const e = byMetric.get(m.id) || { id: m.id, status: 'amber', agents: [] };
+      if (m.status === 'red') e.status = 'red';
+      e.agents.push({ agent: a, metric: m });
+      byMetric.set(m.id, e);
+    })
+  );
+  return [...byMetric.values()]
+    .map((e) => {
+      // the agent to name = the worst one for this check
+      e.agents.sort((x, y) => SEVERITY_RANK[x.metric.status] - SEVERITY_RANK[y.metric.status] || (y.agent.volume || 0) - (x.agent.volume || 0));
+      return e;
+    })
+    .sort((x, y) => SEVERITY_RANK[x.status] - SEVERITY_RANK[y.status] || y.agents.length - x.agents.length);
+}
+
+/** Portfolio figures used to fill the "why" rows when fewer than three checks are failing. */
+function pillarFillers(pillar, f) {
+  if (pillar === 'health') {
+    return [
+      { id: 'agent_availability', label: 'Messages answered', value: fmtPct(f.replyPct), status: f.replyStatus },
+      { id: 'task_completion', label: 'Runs resolved', value: fmtPct(f.resolvedPct), status: f.resolvedStatus },
+      { id: 'failed_execution_rate', label: 'Runs with errors', value: fmtPct(f.errorPct), status: f.errorStatus },
+    ];
+  }
+  if (pillar === 'risk') {
+    const s = (n) => (n ? 'amber' : f.engaged ? 'green' : 'unknown');
+    return [
+      { id: 'prompt_injection_attempts', label: 'Jailbreak attempts blocked', value: fmtNum(f.jailbreaks), status: s(f.jailbreaks) },
+      { id: 'indirect_attacks', label: 'Attacks hidden in documents', value: fmtNum(f.indirect), status: s(f.indirect) },
+      { id: 'content_safety_blocks', label: 'Harmful content & policy blocks', value: fmtNum(f.contentBlocks), status: s(f.contentBlocks) },
+    ];
+  }
+  return [
+    { id: 'spend_total', label: 'Estimated spend', value: f.spend !== null ? fmtUsd(f.spend) : '—', status: '' },
+    { id: 'spend', label: 'Budget used', value: f.budgetUsedPct !== null ? `${fmtPct(f.budgetUsedPct)} of ${fmtUsd(f.budgetTotal)}` : 'No budgets set', status: f.budgetUsedPct !== null ? f.budgetStatus : 'unknown' },
+    { id: 'cost_per_conversation', label: 'Cost per run', value: f.costPerRun !== null ? fmtUsd(f.costPerRun) : '—', status: '' },
+  ];
+}
+
+/** One plain-English sentence that explains the badge. */
+function pillarSentence(pillar, issues, counts, f, library) {
+  const top = issues[0];
+  if (top) {
+    const { agent, metric } = top.agents[0];
+    const others = top.agents.length - 1;
+    return {
+      tone: top.status,
+      text: (
+        <>
+          <b>{ISSUE_TEXT[top.id] || metric.name}</b> {metric.value} on {agent.name}
+          {others > 0 ? ` and ${plural(others, 'other agent')}` : ''} <span className="ph-target">({targetText(library, top.id)})</span>
+        </>
+      ),
+    };
+  }
+  const rated = (counts.green || 0) + (counts.amber || 0) + (counts.red || 0);
+  if (rated) {
+    const ok = { health: 'Agents are answering, finishing the job and responding on time.', risk: 'No unsafe behaviour or attacks detected.', cost: 'Spend is within budget.' };
+    return { tone: 'green', text: ok[pillar] };
+  }
+  if (pillar === 'cost' && f.noBudget) {
+    return { tone: 'unknown', text: <>No budgets set, so cost can’t be rated. Estimated spend so far: <b>{f.spend !== null ? fmtUsd(f.spend) : '—'}</b>.</> };
+  }
+  return { tone: 'unknown', text: 'Too little activity to rate yet. Try a longer reporting period.' };
+}
+
+function PillarHero({ pillar, agents, figures, scopeLabel, library, goAgents, openAgent }) {
   const meta = PILLAR_META[pillar];
   const Icon = meta.icon;
   const counts = countBy(agents, (a) => a.statuses[pillar]);
   const status = worst(agents.map((a) => a.statuses[pillar]));
-  const attention = agents.filter((a) => ['red', 'amber'].includes(a.statuses[pillar])).length;
-  const f = figures;
+  const red = counts.red || 0;
+  const amber = counts.amber || 0;
+  const attention = red + amber;
+  const rated = attention + (counts.green || 0);
+  const unrated = counts.unknown || 0;
 
-  let big;
-  let stats;
-  if (pillar === 'health') {
-    big = { label: 'Runs resolved', value: fmtPct(f.resolvedPct), status: f.resolvedStatus,
-      tip: 'Conversations and automatic runs that finished without an error, escalation or fallback.' };
-    stats = [
-      { label: 'Runs with errors', value: fmtPct(f.errorPct), status: f.errorStatus },
-      { label: 'User messages answered', value: fmtPct(f.replyPct), status: f.replyStatus },
-      { label: 'Slowest response (95th pct.)', value: f.slowest ? `${Math.round(f.slowest.raw.p95 * 10) / 10}s` : '—', tip: f.slowest ? `Agent: ${f.slowest.name}` : 'Needs at least 10 answered messages' },
-    ];
-  } else if (pillar === 'risk') {
-    big = { label: 'Safety blocks', value: fmtNum(f.safetyBlocks), status: f.safetyBlocks ? 'amber' : f.engaged ? 'green' : 'unknown',
-      tip: 'Requests or answers stopped by the platform guardrails: jailbreaks, attacks hidden in documents, harmful content and data-policy blocks.' };
-    stats = [
-      { label: 'Jailbreak attempts', value: fmtNum(f.jailbreaks) },
-      { label: 'Attacks hidden in documents', value: fmtNum(f.indirect) },
-      { label: 'Harmful content & policy blocks', value: fmtNum(f.contentBlocks) },
-    ];
+  const issues = useMemo(() => pillarIssues(agents, pillar), [agents, pillar]);
+  const sentence = pillarSentence(pillar, issues, counts, figures, library);
+
+  // "Why" rows: failing checks first (named agent + worst value), then rated portfolio figures.
+  const issueRows = issues.slice(0, 3).map((i) => {
+    const { agent, metric } = i.agents[0];
+    return {
+      key: i.id,
+      label: ISSUE_TEXT[i.id] || metric.name,
+      detail: i.agents.length > 1 ? `${plural(i.agents.length, 'agent')} · worst ${agent.name}` : agent.name,
+      value: metric.value,
+      status: i.status,
+      target: targetText(library, i.id),
+      onClick: () => openAgent(agent.id, pillar),
+    };
+  });
+  const used = new Set(issueRows.map((r) => r.key));
+  const fillRows = pillarFillers(pillar, figures)
+    .filter((r) => !used.has(r.id))
+    .map((r) => ({ key: r.id, label: r.label, detail: scopeLabel, value: r.value, status: r.status, target: targetText(library, r.id) }));
+  const rows = [...issueRows, ...fillRows].slice(0, 3);
+
+  // Verdict
+  let bigValue;
+  let bigText;
+  if (attention) {
+    bigValue = fmtNum(attention);
+    bigText = `of ${plural(rated, 'rated agent')} ${attention === 1 ? 'needs' : 'need'} attention`;
+  } else if (rated) {
+    bigValue = fmtNum(rated);
+    bigText = rated === 1 ? 'rated agent, healthy' : 'rated agents, all healthy';
   } else {
-    big = { label: 'Estimated spend', value: f.spend !== null ? fmtUsd(f.spend) : '—', status: f.overBudget ? 'red' : f.budgetStatus,
-      tip: 'Copilot Studio: (chat replies + automatic runs) × credits per response × price per credit. Foundry: tokens × model price. An estimate, not an invoice.' };
-    stats = [
-      { label: 'Budget used', value: f.budgetUsedPct !== null ? `${fmtPct(f.budgetUsedPct)} of ${fmtUsd(f.budgetTotal)}` : 'No budgets set', status: f.budgetStatus,
-        tip: f.noBudget ? `${plural(f.noBudget, 'active agent has', 'active agents have')} no budget. Set budgets under Manage agents to rate Cost.` : undefined },
-      { label: 'Agents over budget', value: fmtNum(f.overBudget), status: f.overBudget ? 'red' : '' },
-      { label: 'Cost per run', value: f.costPerRun !== null ? fmtUsd(f.costPerRun) : '—' },
-    ];
+    bigValue = '—';
+    bigText = pillar === 'cost' && figures.noBudget ? 'not rated — no budgets set' : 'not rated yet';
   }
+
+  const flagged = agents.filter((a) => a.statuses[pillar] === 'red' || a.statuses[pillar] === 'amber')
+    .sort((x, y) => SEVERITY_RANK[x.statuses[pillar]] - SEVERITY_RANK[y.statuses[pillar]]);
 
   return (
     <article className={`pillar-hero tone-${status}`} aria-label={`${meta.name}: ${STATUS_LABELS[status]}`}>
@@ -596,29 +715,61 @@ function PillarHero({ pillar, agents, figures, scopeLabel, goAgents }) {
         <StatusBadge value={status} />
       </header>
 
-      <div className="ph-big">
-        <span className="ph-big-label">{big.label} <Tip text={big.tip} /></span>
-        <b className={big.status}>{big.value}</b>
-        <span className="ph-big-scope">{scopeLabel}</span>
+      <div className="ph-verdict">
+        <div className="ph-count">
+          <b className={attention ? (red ? 'red' : 'amber') : rated ? 'green' : 'unknown'}>{bigValue}</b>
+          <span>{bigText}</span>
+        </div>
+        <p className={`ph-sentence ${sentence.tone}`}>{sentence.text}</p>
       </div>
 
-      <dl className="ph-stats">
-        {stats.map((s) => (
-          <div key={s.label} className="ph-stat">
-            <dt>{s.label} {s.tip && <Tip text={s.tip} />}</dt>
-            <dd className={s.status || ''}>{s.value}</dd>
-          </div>
-        ))}
-      </dl>
+      <div className="ph-why">
+        <span className="ph-label">
+          {issueRows.length ? 'What’s driving this' : 'Key figures'}{' '}
+          <Tip text={issueRows.length
+            ? 'Checks outside their limits, worst first. The agent named is the worst case; select a row to open its evidence.'
+            : `Portfolio figures for agents active in the ${scopeLabel.toLowerCase()}, rated against the same limits as each agent.`} />
+        </span>
+        <ul className="ph-rows">
+          {rows.map((r) => {
+            const Tag = r.onClick ? 'button' : 'div';
+            return (
+              <li key={r.key}>
+                <Tag className={`ph-row ${r.onClick ? 'clickable' : ''}`} type={r.onClick ? 'button' : undefined} onClick={r.onClick}
+                  title={r.onClick ? 'Open the evidence for this agent' : undefined}>
+                  <i className={`dot ${r.status || 'none'}`} aria-hidden="true" />
+                  <span className="ph-row-copy">
+                    <span className="ph-row-label">{r.label}</span>
+                    <span className="ph-row-detail">{r.detail}</span>
+                  </span>
+                  <span className="ph-row-value">
+                    <b className={r.status || ''}>{r.value}</b>
+                    {r.target && <small>{r.target}</small>}
+                  </span>
+                </Tag>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
 
       <div className="ph-dist">
-        <span className="ph-label">Agents by status</span>
-        <StatusSplit counts={counts} total={agents.length} label={`${meta.name} status of agents`} showLabels />
+        <StatusSplit counts={counts} total={agents.length} label={`${meta.name} status of agents`} />
+        <span className="ph-dist-text">
+          {[red && `${red} action`, amber && `${amber} watch`, counts.green && `${counts.green} healthy`].filter(Boolean).join(' · ') || 'None rated'}
+          {unrated ? <span className="muted"> · {unrated} too quiet to rate</span> : null}
+        </span>
       </div>
 
       <footer className="ph-foot">
-        <span className={attention ? 'ph-attn' : 'ph-ok'}>
-          {attention ? `${plural(attention, 'agent needs', 'agents need')} attention` : agents.some((a) => a.statuses[pillar] !== 'unknown') ? 'No agent needs attention' : 'Too little activity to rate yet'}
+        <span className={`ph-who ${attention ? '' : 'ok'}`}>
+          {flagged.length ? (
+            <>
+              Look at:{' '}
+              <button type="button" className="link-btn inline" onClick={() => openAgent(flagged[0].id, pillar)}>{flagged[0].name}</button>
+              {flagged.length > 1 && <span className="muted"> +{flagged.length - 1} more</span>}
+            </>
+          ) : rated ? 'No agent needs attention' : 'Nothing to act on yet'}
         </span>
         <button className="link-btn" type="button" onClick={() => goAgents(attention ? { pillar, status: 'attention' } : {})}>
           View agents <ArrowRight size={13} />
@@ -700,7 +851,7 @@ function Overview({ agents, removed, days, library, kpis, goAgents, goManage, op
     <>
       <section className="hero-grid" aria-label="Health, risk and cost">
         {PILLARS.map((pl) => (
-          <PillarHero key={pl} pillar={pl} agents={agents} figures={figures} scopeLabel={scopeLabel} goAgents={goAgents} />
+          <PillarHero key={pl} pillar={pl} agents={agents} figures={figures} scopeLabel={scopeLabel} library={library} goAgents={goAgents} openAgent={openAgent} />
         ))}
       </section>
       {!active.length && (

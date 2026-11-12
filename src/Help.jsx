@@ -170,7 +170,7 @@ export default function Help({ close, library, initialSection = 'start', sources
                 is it <b>affordable</b> (Cost)? Every colour is calculated automatically from runtime telemetry — nobody types in a status.
               </p>
               <div className="help-steps">
-                <div><span>1</span><p><b>Read the three cards at the top.</b> Health, Risk and Cost each show the headline figure, agents by status and which agents need attention.</p></div>
+                <div><span>1</span><p><b>Read the three cards at the top.</b> Each card answers its question in one line: how many agents need attention, the main reason (with the target it missed) and which agent to look at first.</p></div>
                 <div><span>2</span><p><b>Check the overall strip below.</b> Overall status, agents monitored, activity and AI-policy gaps in one line.</p></div>
                 <div><span>3</span><p><b>Select an agent.</b> Any agent named in a card or table opens straight to its evidence.</p></div>
                 <div><span>4</span><p><b>Add details.</b> Under Manage agents, give each agent a name, department, owners and budget so policy checks and Cost can be rated.</p></div>
